@@ -1,0 +1,361 @@
+<?xml version='1.0' encoding='utf-8'?>
+<addons><addon id="plugin.video.discoveryplus" version="1.7.4+matrix.1" name="discovery+" provider-name="Dis90">
+<requires>
+  <import addon="xbmc.python" version="3.0.0" />
+  <import addon="script.module.requests" version="2.9.1" />
+  <import addon="script.module.inputstreamhelper" version="0.2.4" />
+  <import addon="inputstream.adaptive" version="2.6.1" />
+  <import addon="script.module.routing" version="0.2.0" />
+</requires>
+<extension point="xbmc.python.pluginsource" library="default.py">
+  <provides>video</provides>
+</extension>
+<extension point="xbmc.service" library="services.py" />
+<extension point="xbmc.addon.metadata">
+  <reuselanguageinvoker>true</reuselanguageinvoker>
+  <summary lang="en">discovery+</summary>
+  <description lang="en" />
+  <disclaimer lang="en" />
+  <assets>
+    <icon>resources/icon.png</icon> 
+    <fanart>resources/fanart.jpg</fanart>
+  </assets>
+  <news>
+    v1.7.4+matrix.1 (22.11.2023)
+    - Fix sport categories
+    v1.7.3+matrix.1 (26.8.2023)
+    - Minor code changes
+    - New fanart
+    v1.7.2+matrix.1 (18.7.2023)
+    - Add new country infolabel
+    - New artwork (landscape, keyart)
+    - Minor fixes/changes
+    v1.7.1+matrix.1 (8.7.2023)
+    - Add new premiered infolabel to tvshows
+    - Limit used artwork quality to same as d+ website
+    v1.7.0+matrix.1 (4.7.2023)
+    - New feature: Automatic select for unwatched season and episode
+    - Fix: Hardcoded resolutions for UHD and HD
+    - Fix season markers when episode count is more than user is set to per page limit
+    - Fix displaying playback progress without d+ sync
+    - Load user data only once per listing (huge speed up for episode listings)
+    - Option to logout
+    v1.6.25+matrix.1 (26.6.2023)
+    - Fix empty genres in d+ US
+    - Show profile dialog after login (to prevent bypass PIN locked main profile)
+    - Fix empty search query (Kodi getting stuck)
+    v1.6.24+matrix.1 (21.7.2022)
+    - Fix login
+    v1.6.23+matrix.1 (1.7.2022)
+    - Fix playback progress update after fastforward or rewind
+    - Fix playback progress update when using Up Next
+    v1.6.22+matrix.1 (29.5.2022)
+    - Profiles and PIN code login for d+ India
+    - Other minor changes
+    v1.6.21+matrix.1 (28.4.2022)
+    - New profiles dialog
+    - PIN code login now checks code every 5 seconds (previously 10 sec)
+    - Age limit for profile is shown on profiles dialog if kids profile
+    - Other minor fixes
+    v1.6.20+matrix.1 (23.4.2022)
+    - Debug logging userdata and token request is now disabled
+    v1.6.19+matrix.1 (15.4.2022)
+    - Properly fixed PIN login
+    v1.6.18+matrix.1 (15.4.2022)
+    - Hotfix for PIN login
+    v1.6.17+matrix.1 (15.4.2022)
+    - Implement login with PIN code
+    - Other minor fixes and changes
+    v1.6.16+matrix.1 (21.2.2022)
+    - Cache is no longer used in seasons page when sync playback and season markers is turned on. Fixes updating watched status of the season when going back from episodes listing.
+    - Up Next now only recommends to watch episodes from same TV show
+    - Minor fixes
+    v1.6.15+matrix.1 (16.2.2022)
+    - Added setting for showing watched season markers (default is off). Can slown down listing seasons page.
+    - Code improvements
+    v1.6.14+matrix.1 (10.2.2022)
+    - Code improvements
+    - You can now also mark seasons as watched or unwatched
+    - Dutch translation (thanks to djdirty60)
+    - If you are using IPTV Manager you need to refresh channels from IPTV Manager settings also 
+      if you are using Kodi favorites you need to re-add them after this update because of changes made to add-on internal urls
+    v1.6.13+matrix.1 (4.2.2022)
+    - You can now mark videos as watched or unwatched
+    - Minor fixes
+    v1.6.12+matrix.1 (1.2.2022)
+    - Fix sport genre artwork
+    - Add Home -&gt; For You -&gt; Continue Watching (US and EU)
+    - Change video aired date from airDate to earliestPlayableStart
+    - Code cleanup
+    - Other minor fixes
+    v1.6.11+matrix.1 (22.1.2022)
+    - Minor fixes
+    v1.6.10+matrix.1 (21.1.2022)
+    - Minor fixes
+    v1.6.9+matrix.1 (8.1.2022)
+    - Fix empty channels (IPTV Manager integration)
+    - Add reuselanguageinvoker to addon.xml (possible speed up for loading data)
+    v1.6.8+matrix.1 (23.12.2021)
+    - Enable or disable DRM from settings
+    v1.6.7+matrix.1 (19.12.2021)
+    - Playback progress updating is now blocked only for Live TV
+    - Fix realmservice on Kodi 18
+    v1.6.6+matrix.1 (19.12.2021)
+    - Fixes to realmservice in case folder or file is missing
+    v1.6.5+matrix.1 (18.12.2021)
+    - Fix channel pages with only livestream
+    - Country specific content rating system (mpaa)
+    - Rename favorites to My List (context menu add/remove from My List)
+    - Get country specific configs from discovery+ realm service. No more hard coded values (except d+ India)
+    - Fix for listing shows without seasons when seasonsonly setting is set to true
+    - Home -&gt; For You -&gt; Networks or Network Rail is now translated to Channels
+    v1.6.4+matrix.1 (15.12.2021)
+    - More fixes and improvements to EPG data (European countries)
+    - Option to set cookie in add-on settings
+    v1.6.3+matrix.1 (14.12.2021)
+    - Fix listing Shows page (UK)
+    v1.6.2+matrix.1 (14.12.2021)
+    - Support for switching profile (US and EU)
+    - Fix EPG for sport events (European countries)
+    v1.6.1+matrix.1 (14.12.2021)
+    - Fix IPTV Manager EPG (European countries)
+    v1.6.0+matrix.1 (13.12.2021)
+    - Support for new API in European countries. You need to get new cookies from browser.
+    - Updated player properties to same in all countries.
+    v1.5.24+matrix.1 (14.9.2021)
+    - Fixed season list when data contains empty collection
+    v1.5.23+matrix.1 (19.8.2021)
+    - New setting for only listing seasons in season listing (EU countries)
+    - If setting for hiding non season categories from seasons page is enabled, you can enable setting for flatten TV show seasons if only one season (EU countries)
+    v1.5.22+matrix.1 (14.8.2021)
+    - Promoted items are now displayed (rows with large banner but no title) - European countries
+    v1.5.21+matrix.1 (26.7.2021)
+    - Fixed season list displaying wrong metadata in some European countries 
+  </news>
+</extension>
+</addon><addon id="plugin.video.fen" name="Fen" provider-name="Tikipeter" version="3.2.29">
+    <requires>
+        <import addon="xbmc.python" version="3.0.0" />
+        <import addon="script.module.requests" version="2.19.1" />
+    </requires>
+    <extension library="resources/lib/fen.py" point="xbmc.python.pluginsource">
+        <provides>video</provides>
+    </extension>
+    <extension library="resources/lib/service.py" point="xbmc.service" />
+    <extension library="resources/lib/" point="xbmc.python.module" />
+    <extension point="xbmc.addon.metadata">
+        <reuselanguageinvoker>true</reuselanguageinvoker>
+        <summary lang="en">Access your content from Furk, Easynews and Debrid Clouds.</summary>
+        <description lang="en">This add-on is intended for advanced Kodi users only. You must own the content of any media you play through this addon.</description>
+        <platform>all</platform>
+		<disclaimer lang="en">The author of this addon does not host any of the content which is found and has no affiliation with any of the content providers.</disclaimer>
+        <license>GNU GENERAL PUBLIC LICENSE. Version 3, 29 June 2007</license>
+        <assets>
+            <icon>resources/media/fen_icon.png</icon>
+            <fanart>resources/media/fen_fanart.png</fanart>
+        </assets>
+        <news>INFO: For latest changes see Changelog within Tools of add-on.</news>
+    </extension>
+</addon><addon id="plugin.video.injustice" name="Injustice" version="3.4.9a" provider-name="The Hood">
+  <requires>
+	
+  </requires>
+  <extension point="xbmc.python.pluginsource" library="default.py">
+        <provides>video</provides>
+  </extension>
+  <extension library="resources/modules/" point="xbmc.python.module" />
+  <extension library="resources/sources/" point="xbmc.python.module" />
+  <extension library="resources/" point="xbmc.python.module" />
+  <extension point="xbmc.addon.metadata">
+	<reuselanguageinvoker>true</reuselanguageinvoker>
+    <summary lang="en">The best and latest Movies and TV Shows from around the net</summary>
+    <description lang="en">Injustice states the media is as fast as possible</description>
+	
+    <platform>all</platform>
+	<assets>
+            <icon>icon.png</icon>
+            <fanart>fanart.jpg</fanart>
+    </assets>
+  </extension>
+  
+</addon><addon id="plugin.video.morbius" name="Morbius" version="3.4.9a" provider-name="The Hood">
+  <requires>
+	
+  </requires>
+  <extension point="xbmc.python.pluginsource" library="default.py">
+        <provides>video</provides>
+  </extension>
+  <extension library="resources/modules/" point="xbmc.python.module" />
+  <extension library="resources/sources/" point="xbmc.python.module" />
+  <extension library="resources/" point="xbmc.python.module" />
+  <extension point="xbmc.addon.metadata">
+	<reuselanguageinvoker>true</reuselanguageinvoker>
+    <summary lang="en">The best and latest Movies and TV Shows from around the net</summary>
+    <description lang="en">Morbius states the media is as fast as possible</description>
+	
+    <platform>all</platform>
+	<assets>
+            <icon>icon.png</icon>
+			<icon>icon2.png</icon>			
+            <fanart>fanart.jpg</fanart>
+    </assets>
+  </extension>
+  
+</addon><addon id="plugin.video.nightwinglite" name="Nightwing Lite" version="0.0.1j" provider-name="The Hood">
+  <requires>
+	
+  </requires>
+  <extension point="xbmc.python.pluginsource" library="default.py">
+        <provides>video</provides>
+  </extension>
+  <extension library="resources/modules/" point="xbmc.python.module" />
+  <extension library="resources/sources/" point="xbmc.python.module" />
+  <extension library="resources/" point="xbmc.python.module" />
+  <extension point="xbmc.addon.metadata">
+	<reuselanguageinvoker>true</reuselanguageinvoker>
+    <summary lang="en">Nightwing Lite is a Short, and faster version of Nightwing. Shoutout to everyone that helped out</summary>
+    <description lang="en">This was created to bring you media as fast as possible.The addon is meant to be a one click media,All content was found on the web</description>
+	
+    <platform>all</platform>
+	<assets>
+            <icon>icon.png</icon>
+            <fanart>fanart.jpg</fanart>
+    </assets>
+  </extension>
+  
+</addon><addon id="plugin.video.tvlive" name="[B][COLOR mediumslateblue]TV Live Streams[/B][/COLOR]" version="3.1.2" provider-name="[B][COLOR mediumslateblue]The Hood[/B][/COLOR]">
+  <extension point="xbmc.python.pluginsource" library="default.py">
+		<provides>video</provides>
+  </extension>
+  <extension point="xbmc.addon.metadata">
+	<summary lang="en">[COLOR mediumslateblue]An IPTV addon written to work with XC and XCUI for Kodi [/COLOR] </summary>
+	<language>en</language>
+	<description lang="en">[COLOR white]This addon does not supply nor provide any illegal content[/COLOR]</description>
+	<platform>all</platform>
+	<assets>
+		<icon>icon.png</icon>
+		<fanart>fanart.jpg</fanart>
+	</assets>
+  </extension>
+</addon><addon id="plugin.video.youtube" name="YouTube" version="7.0.5+beta.4" provider-name="anxdpanic, bromix, MoojMidge">
+    <requires>
+        <import addon="xbmc.python" version="3.0.0" />
+        <import addon="script.module.requests" version="2.27.1" />
+        <import addon="inputstream.adaptive" version="19.0.0" />
+        <import addon="script.module.inputstreamhelper" version="0.2.2" optional="true" />
+    </requires>
+    <extension point="xbmc.python.pluginsource" library="resources/lib/plugin.py">
+        <provides>video</provides>
+    </extension>
+    <extension point="xbmc.service" library="resources/lib/service.py" />
+    <extension point="xbmc.python.module" library="resources/lib/" />
+    <extension point="xbmc.python.script" library="resources/lib/script.py">
+        <provides>executable</provides>
+    </extension>
+    <extension point="xbmc.addon.metadata">
+        <assets>
+            <icon>resources/media/icon.png</icon>
+            <fanart>resources/media/fanart.jpg</fanart>
+        </assets>
+        <platform>all</platform>
+        <license>GPL-2.0-only</license>
+        <forum>https://ytaddon.panicked.xyz/forum</forum>
+        <website>https://www.youtube.com</website>
+        <source>https://github.com/anxdpanic/plugin.video.youtube</source>
+        <reuselanguageinvoker>true</reuselanguageinvoker>
+        <summary lang="bg_BG">Добавка за YouTube</summary>
+        <summary lang="cs_CZ">Plugin pro YouTube</summary>
+        <summary lang="da_DK">Plugin til YouTube</summary>
+        <summary lang="de_DE">Plugin für YouTube</summary>
+        <summary lang="el_GR">Πρόσθετο YouTube</summary>
+        <summary lang="en_GB">Plugin for YouTube</summary>
+        <summary lang="es_ES">Plugin para YouTube</summary>
+        <summary lang="es_MX">Complemento para YouTube</summary>
+        <summary lang="fi_FI">YouTube-lisäosa</summary>
+        <summary lang="fr_FR">Plugin pour YouTube</summary>
+        <summary lang="he_IL">תוסף עבור YouTube</summary>
+        <summary lang="hr_HR">Dodatak za YouTube</summary>
+        <summary lang="hu_HU">YouTube kiegészítő</summary>
+        <summary lang="id_ID">Pengaya untuk YouTube</summary>
+        <summary lang="it_IT">Plugin per YouTube</summary>
+        <summary lang="ko_KR">유튜브 플러그인</summary>
+        <summary lang="nb_NO">Tillegg for YouTube</summary>
+        <summary lang="nl_NL">Plugin voor YouTube</summary>
+        <summary lang="pl_PL">Wtyczka YouTube</summary>
+        <summary lang="ru_RU">Видеодополнение YouTube</summary>
+        <summary lang="sk_SK">Doplnok pre YouTube</summary>
+        <summary lang="sv_SE">Plugin för YouTube</summary>
+        <summary lang="tr_TR">YouTube için eklenti</summary>
+        <summary lang="vi_VN">Plugin dành cho YouTube</summary>
+        <summary lang="zh_CN">油管插件</summary>
+        <summary lang="zh_TW">YouTube附加元件</summary>
+        <description lang="bg_BG">YouTube е един от най-големите уеб сайтове за споделяне на видео в целия свят.</description>
+        <description lang="cs_CZ">YouTube je jedna z největších webových stránek světa sdílející video.</description>
+        <description lang="da_DK">YouTube er et af verdens største videodelingswebsteder.</description>
+        <description lang="de_DE">YouTube ist eines der größten Video-Sharing-Websites der Welt.</description>
+        <description lang="el_GR">Το YouTube είναι μία από τις μεγαλύτερες ιστοσελίδες διαμοιρασμού βίντεο στον κόσμο.</description>
+        <description lang="en_GB">YouTube is one of the biggest video-sharing websites of the world.</description>
+        <description lang="es_ES">YouTube es uno de los sitios web más grande del mundo para compartir vídeos.</description>
+        <description lang="es_MX">YouTube es uno de los más grandes sitios web de intercambio de videos del mundo.</description>
+        <description lang="fi_FI">YouTube on yksi maailman suurimmista videoiden jakosivustoista.</description>
+        <description lang="fr_FR">YouTube est l'un des plus grands sites de partage vidéos du monde.</description>
+        <description lang="he_IL">YouTube הוא אחד מאתרי שיתוף הווידאו הגדולים בעולם.</description>
+        <description lang="hr_HR">YouTube je jedna od najvećih stranica za dijeljenje video sadržaja na svijetu.</description>
+        <description lang="hu_HU">A YouTube világ egyik legnagyobb videómegosztó weboldala.</description>
+        <description lang="id_ID">YouTube adalah salah satu situs web berbagi video terbesar di dunia.</description>
+        <description lang="it_IT">YouTube è uno dei più grandi siti di condivisione video del mondo.</description>
+        <description lang="ko_KR">유튜브는 세상에서 가장 큰 동영상 공유 사이트 중의 하나입니다.</description>
+        <description lang="nb_NO">YouTube er en av verdens største nettsider for videodeling.</description>
+        <description lang="nl_NL">YouTube is een van de grootste videodelenwebsite in de hele wereld.</description>
+        <description lang="pl_PL">YouTube jest jednym z największych na świecie serwisów udostępniania wideo.</description>
+        <description lang="ru_RU">YouTube - популярнейший видеохостинговый сайт, предоставляющий пользователям услуги хранения, доставки и показа видео.</description>
+        <description lang="sk_SK">YouTube je jednou z najväčších stránok na zdieľanie videa na svete.</description>
+        <description lang="sv_SE">YouTube är en av de största videodelningssajterna i världen.</description>
+        <description lang="tr_TR">YouTube, dünya üzerindeki en büyük video paylaşma platformlarından birisidir.</description>
+        <description lang="vi_VN">YouTube là một trong những trang web chia sẻ video lớn nhất trên thế giới.</description>
+        <description lang="zh_CN">油管是世界上最大的视频分享网站之一。</description>
+        <description lang="zh_TW">Youtube 是全世界最大的影片分享網站。</description>
+        <disclaimer lang="cs_CZ">Tento plugin není schválen společností Google</disclaimer>
+        <disclaimer lang="da_DK">Dette plugin er ikke godkendt af Google</disclaimer>
+        <disclaimer lang="de_DE">Dieses Plugin ist nicht von Google befürwortet</disclaimer>
+        <disclaimer lang="el_GR">Η παρούσα μικροεφαρμογή δεν έχει υϊοθετηθεί από την Google</disclaimer>
+        <disclaimer lang="en_GB">This plugin is not endorsed by Google</disclaimer>
+        <disclaimer lang="es_ES">Este add-on no está respaldado por Google</disclaimer>
+        <disclaimer lang="es_MX">Este complemento no está respaldado por Google</disclaimer>
+        <disclaimer lang="fi_FI">Google ei tue tätä lisäosaa</disclaimer>
+        <disclaimer lang="fr_FR">Ce module n'est pas validé par Google</disclaimer>
+        <disclaimer lang="hr_HR">Ovaj dodatak nije podržan od strane Googlea</disclaimer>
+        <disclaimer lang="id_ID">Plugin ini tidak didukung oleh Google</disclaimer>
+        <disclaimer lang="it_IT">Questo plugin non è approvato da Google</disclaimer>
+        <disclaimer lang="ko_KR">이 플러그인은 Google의 허가를 받지 않았습니다</disclaimer>
+        <disclaimer lang="nl_NL">Deze plug-in wordt niet door Google ondersteund</disclaimer>
+        <disclaimer lang="pl_PL">Ta wtyczka nie jest zatwierdzona przez Google</disclaimer>
+        <disclaimer lang="ru_RU">Плагин не поддерживается Google</disclaimer>
+        <disclaimer lang="sk_SK">Tento doplnok nie je schválený spoločnosťou Google</disclaimer>
+        <disclaimer lang="sv_SE">Detta plugin är inte godkänt av Google</disclaimer>
+        <disclaimer lang="tr_TR">Bu eklenti Google tarafından üretilmemiştir</disclaimer>
+        <disclaimer lang="vi_VN">Plugin này không được xác nhận bởi Google</disclaimer>
+        <disclaimer lang="zh_CN">此插件未被谷歌认可</disclaimer>
+        <disclaimer lang="zh_TW">此附加元件未由Google支持</disclaimer>
+    <news>## v7.0.5+beta.4
+### Fixed
+- Fix typo that caused android player requests to fail</news></extension>
+</addon><addon id="repository.proximus" name="Proximus Repo" version="1.0.1" provider-name="The Hood">
+    <extension point="xbmc.addon.repository" name="Proximus Repo">
+        <dir>
+            <info compressed="false">https://raw.githubusercontent.com/kodiwind/proximus/main/repo/zips/addons.xml</info>
+            <checksum>https://raw.githubusercontent.com/kodiwind/proximus/main/repo/zips/addons.xml.md5</checksum>
+            <datadir zip="true">https://raw.githubusercontent.com/kodiwind/proximus/main/repo/zips/</datadir>
+        </dir>
+    </extension>
+    <extension point="xbmc.addon.metadata">
+        <summary>Proximus Repo</summary>
+        <description>You can find all the latest addons, builds and tools from the Hood in one repo.</description>
+        <disclaimer />
+        <platform>all</platform>
+        <assets>
+            <icon>icon.png</icon>
+            <fanart>fanart.jpg</fanart>
+        </assets>
+    </extension>
+</addon></addons>

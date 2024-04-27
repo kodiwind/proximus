@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="plugin.video.nightwinglite"                                                                                                                                    
+	   name="Nightwing Lite"                                                 
+	   version="0.0.1j"                                                                                                                                        
+	   provider-name="The Hood">
+  <requires>
+	
+  </requires>
+  <extension point="xbmc.python.pluginsource"
+            library="default.py">
+        <provides>video</provides>
+  </extension>
+  <extension library="resources/modules/" point="xbmc.python.module" />
+  <extension library="resources/sources/" point="xbmc.python.module" />
+  <extension library="resources/" point="xbmc.python.module" />
+  <extension point="xbmc.addon.metadata">
+	<reuselanguageinvoker>true</reuselanguageinvoker>
+    <summary lang="en">Nightwing Lite is a Short, and faster version of Nightwing. Shoutout to everyone that helped out</summary>
+    <description lang="en">This was created to bring you media as fast as possible.The addon is meant to be a one click media,All content was found on the web</description>
+	
+    <platform>all</platform>
+	<assets>
+            <icon>icon.png</icon>
+            <fanart>fanart.jpg</fanart>
+    </assets>
+  </extension>
+  
+</addon>
