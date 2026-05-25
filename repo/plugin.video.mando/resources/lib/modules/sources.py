@@ -7,7 +7,7 @@ from caches.episode_groups_cache import episode_groups_cache
 from caches.settings_cache import get_setting
 from scrapers import external, folders
 from modules import debrid, kodi_utils, settings, metadata, watched_status
-from modules.player import MandoPlayer
+from modules.player import RedLightPlayer
 from modules.source_utils import get_cache_expiry, make_alias_dict, include_exclude_filters
 from modules.utils import clean_file_name, string_to_float, safe_string, remove_accents, get_datetime, append_module_to_syspath, manual_function_import
 # logger = kodi_utils.logger
@@ -157,7 +157,13 @@ class Sources():
 		min_seeders = settings.uncached_min_seeders()
 		all_uncached_results = [i for i in results if 'Uncached' in i.get('cache_provider', '')]
 		self.uncached_results = [i for i in all_uncached_results if int(i.get('seeders', '0')) >= min_seeders]
-		results = [i for i in results if not i in all_uncached_results]
+		if settings.include_uncached_torbox():
+			tb_uncached_in_main = [i for i in self.uncached_results if 'TorBox' in i.get('cache_provider', '')]
+			strip_uncached = [i for i in all_uncached_results if i not in tb_uncached_in_main]
+			self.uncached_results = [i for i in self.uncached_results if i not in tb_uncached_in_main]
+		else:
+			strip_uncached = all_uncached_results
+		results = [i for i in results if i not in strip_uncached]
 		if self.ignore_scrape_filters: self.filters_ignored = True
 		else:
 			results = self.filter_results(results)
@@ -507,8 +513,11 @@ class Sources():
 		else: return 1
 
 	def _sort_uncached_results(self, results):
+		if settings.include_uncached_torbox():
+			defer_uncached = [i for i in results if 'Uncached' in i.get('cache_provider', '') and 'TorBox' not in i.get('cache_provider', '')]
+			return [i for i in results if i not in defer_uncached] + defer_uncached
 		uncached = [i for i in results if 'Uncached' in i.get('cache_provider', '')]
-		cached = [i for i in results if not i in uncached]
+		cached = [i for i in results if i not in uncached]
 		return cached + uncached
 
 	def get_meta(self):
@@ -587,15 +596,17 @@ class Sources():
 		self.progress_dialog, self.progress_thread = None, None
 
 	def debridPacks(self, debrid_provider, name, magnet_url, info_hash, download=False):
-		kodi_utils.show_busy_dialog()
-		debrid_info = {'Real-Debrid': 'rd_browse', 'Premiumize.me': 'pm_browse', 'AllDebrid': 'ad_browse', 'TorBox': 'tb_browse'}[debrid_provider]
-		debrid_function = self.debrid_importer(debrid_info)
-		try: debrid_files = debrid_function().display_magnet_pack(magnet_url, info_hash)
-		except: debrid_files = None
-		kodi_utils.hide_busy_dialog()
-		if not debrid_files: return kodi_utils.notification('Error')
-		debrid_files.sort(key=lambda k: k['filename'].lower())
-		if download: return debrid_files, debrid_function
+		from modules.debrid import ExternalPackSource, normalize_debrid_provider
+		debrid_provider = normalize_debrid_provider(debrid_provider)
+		source = {'url': magnet_url, 'hash': info_hash, 'debrid': debrid_provider, 'cache_provider': debrid_provider, 'name': name}
+		pack_result = ExternalPackSource(source).browse_packs(download=download)
+		if not pack_result:
+			return None
+		debrid_info = {'Real-Debrid': 'rd_browse', 'Premiumize.me': 'pm_browse', 'AllDebrid': 'ad_browse', 'TorBox': 'tb_browse'}.get(debrid_provider)
+		if download:
+			debrid_files, _pack_api = pack_result
+			return debrid_files, self.debrid_importer(debrid_info)
+		debrid_files = pack_result
 		list_items = [{'line1': '%.2f GB | %s' % (float(item['size'])/1073741824, clean_file_name(item['filename']).upper())} for item in debrid_files]
 		kwargs = {'items': json.dumps(list_items), 'heading': name, 'enumerate': 'true', 'narrow_window': 'true'}
 		chosen_result = kodi_utils.select_dialog(debrid_files, **kwargs)
@@ -603,7 +614,7 @@ class Sources():
 		link = self.resolve_internal(debrid_info, chosen_result['link'], '')
 		name = chosen_result['filename']
 		self._kill_progress_dialog()
-		return MandoPlayer().run(link, 'video')
+		return RedLightPlayer().run(link, 'video')
 
 	def play_file(self, results, source={}):
 		self.playback_successful, self.cancel_all_playback = None, False
@@ -661,7 +672,7 @@ class Sources():
 					url, self.playback_successful, self.cancel_all_playback = None, None, False
 					self.playing_filename = item['name']
 					self.playing_item = item
-					player = MandoPlayer()
+					player = RedLightPlayer()
 					try:
 						if self.progress_dialog.iscanceled() or monitor.abortRequested(): break
 						url = self.resolve_sources(item)

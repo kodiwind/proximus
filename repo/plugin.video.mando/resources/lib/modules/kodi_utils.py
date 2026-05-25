@@ -127,10 +127,10 @@ def addon_fanart():
 		or 'special://home/addons/plugin.video.mando/resources/media/fanart.jpg'
 	)
 
-MEDIA_GITHUB_USER = 'kodiwind'
-MEDIA_GITHUB_REPO = 'kodiwind.github.io/proximus'
+MEDIA_GITHUB_USER = 'The-Red-Wizard'
+MEDIA_GITHUB_REPO = 'TheRedWizard.github.io'
 MEDIA_GITHUB_RAW = 'https://raw.githubusercontent.com/%s/%s/main/packages/media' % (MEDIA_GITHUB_USER, MEDIA_GITHUB_REPO)
-LEGACY_MEDIA_GITHUB_RAW = 'https://raw.githubusercontent.com/kodiwind/kodiwind.github.io/proximus/main/packages/media'
+LEGACY_MEDIA_GITHUB_RAW = 'https://raw.githubusercontent.com/TheRedWizard/TheRedWizard.github.io/main/packages/media'
 
 def media_github_credentials():
 	return MEDIA_GITHUB_USER, MEDIA_GITHUB_REPO
@@ -484,8 +484,8 @@ def player_check(mode, params):
 		from modules.sources import Sources
 		Sources().playback_prep(params)
 	elif mode == 'playback.video':
-		from modules.player import MandoPlayer
-		MandoPlayer().run(params.get('url', None), params.get('obj', None))
+		from modules.player import RedLightPlayer
+		RedLightPlayer().run(params.get('url', None), params.get('obj', None))
 	else: ok_dialog('External Playback Detected', 'Playback through external addons is not supported')
 
 def external_playback_check(params):

@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='utf-8'?>
-<addons><addon id="plugin.video.mando" name="[COLOR gold]Mando[/COLOR]" provider-name="[COLOR gold]The Hood[/COLOR]" version="1.1.1a">
+<addons><addon id="plugin.video.mando" name="[COLOR gold]Mando[/COLOR]" provider-name="[COLOR gold]The hood/COLOR]" version="1.1.4">
     <requires>
         <import addon="xbmc.python" version="3.0.1" />
         <import addon="script.module.pil" version="1.1.7" />
@@ -12,7 +12,7 @@
     <extension point="xbmc.python.module" library="resources/lib/" />
     <extension point="xbmc.addon.metadata">
         <reuselanguageinvoker>true</reuselanguageinvoker>
-        <summary lang="en">[COLOR gold]Fork of FenLight[/COLOR]</summary>
+        <summary lang="en">[COLOR gold]gold Light[/COLOR]</summary>
         <description lang="en">[COLOR gold]* We will not revoke our Trakt or TMDb keys
 * We will not block any third party apps or skins
 * No politics
@@ -133,7 +133,7 @@ Many thanks to those who assisted with the TMDb Helper patch and restoring the i
     <news>## v7.0.5+beta.4
 ### Fixed
 - Fix typo that caused android player requests to fail</news></extension>
-</addon><addon id="repository.proximus" name="Proximus Repo" version="1.0.2" provider-name="The Hood">
+</addon><addon id="repository.proximus" name="Proximus Repo" version="1.0.4" provider-name="The Hood">
     <extension point="xbmc.addon.repository" name="Proximus Repo">
         <dir>
             <info compressed="false">https://raw.githubusercontent.com/kodiwind/proximus/main/repo/zips/addons.xml</info>

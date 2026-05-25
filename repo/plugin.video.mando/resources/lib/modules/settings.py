@@ -274,6 +274,12 @@ def filter_by_name(scraper):
 def uncached_min_seeders():
 	return int(get_setting('mando.results.uncached_min_seeders', '0'))
 
+def include_uncached_torbox():
+	return get_setting('mando.external.include_uncached_torbox', 'false') == 'true'
+
+def tb_notify_cloud_ready():
+	return get_setting('mando.tb.notify_cloud_ready', 'true') == 'true'
+
 def easynews_language_filter():
 	enabled = get_setting('mando.easynews.filter_lang') == 'true'
 	if enabled: filters = get_setting('mando.easynews.lang_filters').split(', ')

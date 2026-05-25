@@ -221,7 +221,7 @@ class AddonXMLCheck:
 		from indexers.dialogs import addon_icon_choice
 		addon_icon_choice({'set_icon': get_setting('addon_icon_choice_name', 'icon.png')})
 
-class MandoMonitor(Monitor):
+class RedLightMonitor(Monitor):
 	def __init__ (self):
 		Monitor.__init__(self)
 		self.startServices()
@@ -253,5 +253,5 @@ class MandoMonitor(Monitor):
 			kodi_utils.logger('OnNotificationActions', 'UNPAUSING Mando Services Due to Device Awake')
 
 kodi_utils.logger('Mando', 'Main Monitor Service Starting')
-MandoMonitor().waitForAbort()
+RedLightMonitor().waitForAbort()
 kodi_utils.logger('Mando', 'Main Monitor Service Finished')

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<addon id="repository.proximus" name="Proximus Repo" version="1.0.2" provider-name="The Hood">
+<addon id="repository.proximus" name="Proximus Repo" version="1.0.4" provider-name="The Hood">
     <extension point="xbmc.addon.repository" name="Proximus Repo">
         <dir>
             <info compressed="false">https://raw.githubusercontent.com/kodiwind/proximus/main/repo/zips/addons.xml</info>
