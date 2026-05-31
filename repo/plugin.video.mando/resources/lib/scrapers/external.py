@@ -69,8 +69,8 @@ class source:
 					self.progress_dialog.update_scraper(self.sources_sd, self.sources_720p, self.sources_1080p, self.sources_4k, self.sources_total, line1, percent)
 					if self.threads_completed:
 						len_alive_threads = len(alive_threads)
-						if len_alive_threads == 0 or percent >= 100: break
-					elif percent >= 100: break
+						if len_alive_threads == 0: break
+					if percent >= 100: break
 					kodi_utils.sleep(100)
 				except: pass
 			return
@@ -105,24 +105,36 @@ class source:
 		return []
 
 	def process_movie_threads(self):
-		for i in self.source_dict:
-			provider, module = i[0], i[1]
-			threaded_object = Thread(target=self.get_movie_source, args=(provider, module), name=provider)
-			threaded_object.start()
-			self.threads_append(threaded_object)
-		self.threads_completed = True
+		try:
+			for i in self.source_dict:
+				provider, module = i[0], i[1]
+				threaded_object = Thread(target=self.get_movie_source, args=(provider, module), name=provider)
+				try:
+					threaded_object.start()
+					self.threads_append(threaded_object)
+				except RuntimeError:
+					# If the runtime cannot spawn more threads, finish remaining work serially.
+					self.get_movie_source(provider, module)
+		finally:
+			self.threads_completed = True
 
 	def process_episode_threads(self):
-		for i in self.source_dict:
-			provider, module = i[0], i[1]
-			try: pack_arg = i[2]
-			except: pack_arg = ''
-			if pack_arg: provider_display = '%s (%s)' % (i[0], i[2])
-			else: provider_display = provider
-			threaded_object = Thread(target=self.get_episode_source, args=(provider, module, pack_arg), name=provider_display)
-			threaded_object.start()
-			self.threads_append(threaded_object)
-		self.threads_completed = True
+		try:
+			for i in self.source_dict:
+				provider, module = i[0], i[1]
+				try: pack_arg = i[2]
+				except: pack_arg = ''
+				if pack_arg: provider_display = '%s (%s)' % (i[0], i[2])
+				else: provider_display = provider
+				threaded_object = Thread(target=self.get_episode_source, args=(provider, module, pack_arg), name=provider_display)
+				try:
+					threaded_object.start()
+					self.threads_append(threaded_object)
+				except RuntimeError:
+					# If the runtime cannot spawn more threads, finish remaining work serially.
+					self.get_episode_source(provider, module, pack_arg)
+		finally:
+			self.threads_completed = True
 
 	def get_movie_source(self, provider, module):
 		sources = external_cache.get(provider, self.media_type, self.tmdb_id, self.title, self.year, '', '')
@@ -185,8 +197,9 @@ class source:
 				if self.external_cache_check: cached = function(hash_list, cached_hashes, self.data, self.active_debrid)
 				else: cached = hash_list
 			else: cached = function(hash_list, cached_hashes)
-			if not self.background: self.process_quality_count_final([i for i in results if i['hash'] in cached])
-			final_results.extend([dict(i, **{'cache_provider': provider if i['hash'] in cached else 'Uncached %s' % provider, 'debrid': provider}) for i in results])
+			cached_set = set(str(i).lower() for i in cached)
+			if not self.background: self.process_quality_count_final([i for i in results if i.get('hash', '').lower() in cached_set])
+			final_results.extend([dict(i, **{'cache_provider': provider if i.get('hash', '').lower() in cached_set else 'Uncached %s' % provider, 'debrid': provider}) for i in results])
 		def _debrid_check_dialog():
 			self.progress_dialog.reset_is_cancelled()
 			start_time, timeout = time.time(), 20
@@ -205,7 +218,7 @@ class source:
 			if not self.background and self.all_internal_sources: self.process_quality_count_final(self.all_internal_sources)
 			final_results = []
 			results = list(_process_duplicates(results))
-			hash_list = list(set([i['hash'] for i in results]))
+			hash_list = list(set([i['hash'].lower() for i in results if i.get('hash') and len(i['hash']) == 40]))
 			cached_hashes = query_local_cache(hash_list)
 			debrid_check_threads = [Thread(target=_process_cache_check, args=self.debrid_runners[item], name=item) for item in self.active_debrid]
 			[i.start() for i in debrid_check_threads]

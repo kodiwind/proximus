@@ -76,13 +76,34 @@ class AllDebridAPI:
 		return response
 
 	def check_cache(self, hashes):
-		data = {'magnets[]': hashes}
-		response = self._post('magnet/instant', data)
-		return response
+		if isinstance(hashes, str): hashes = [hashes]
+		if not hashes or self.token in ('empty_setting', ''): return None
+		params = [('agent', self.user_agent), ('apikey', self.token)]
+		for h in hashes:
+			h = str(h).lower()
+			if len(h) == 40:
+				params.append(('magnets[]', h))
+		if len(params) <= 2: return None
+		try:
+			result = requests.get('%smagnet/instant' % self.base_url, params=params, timeout=20).json()
+			if result.get('status') != 'success': return None
+			data = result.get('data') or result
+			if isinstance(data, dict) and 'magnets' in data: return data
+			if isinstance(data, list): return {'magnets': data}
+		except: pass
+		return None
 
 	def check_single_magnet(self, hash_string):
-		cache_info = self.check_cache(hash_string)['magnets'][0]
-		return cache_info['instant']
+		response = self.check_cache([hash_string])
+		if not response or 'magnets' not in response or not response['magnets']: return False
+		cache_info = response['magnets'][0]
+		if cache_info.get('error'): return False
+		instant = cache_info.get('instant')
+		if instant is True or instant == 1: return True
+		if str(instant).lower() in ('true', '1', 'yes'): return True
+		ready = cache_info.get('ready')
+		if ready is True or ready == 1: return True
+		return str(ready).lower() in ('true', '1', 'yes')
 
 	def _delete_cache_key(self, string):
 		try:
@@ -230,10 +251,11 @@ class AllDebridAPI:
 		except: pass
 		return result
 
-	def _post(self, url, data={}):
+	def _post(self, url, data=None):
 		result = None
 		try:
 			if self.token in ('empty_setting', ''): return None
+			if data is None: data = {}
 			url = self.base_url + url + '?agent=%s&apikey=%s' % (self.user_agent, self.token)
 			result = requests.post(url, data=data, timeout=20).json()
 			if result.get('status') == 'success' and 'data' in result: result = result['data']

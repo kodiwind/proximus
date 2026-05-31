@@ -66,7 +66,8 @@ def rescrape_items():
 	{'name': 'Rescrape With IMDb Year Data', 'value': 'imdb_year'},
 	{'name': 'Rescrape With All Scrapers', 'value': 'with_all'},
 	{'name': 'Rescrape With Episode Group', 'value': 'episode_group'},
-	{'name': 'Rescrape with Filters Ignored', 'value': 'ignore_filters'}]
+	{'name': 'Rescrape with Filters Ignored', 'value': 'ignore_filters'},
+	{'name': 'Start Full Scrape (After Prescrape)', 'value': 'full_scrape'}]
 
 def video_extensions():
 	return ('m4v', '3g2', '3gp', 'nsv', 'tp', 'ts', 'ty', 'pls', 'rm', 'rmvb', 'mpd', 'ifo', 'mov', 'qt', 'divx', 'xvid', 'bivx', 'vob', 'nrg', 'img', 'iso', 'udf', 'pva',
@@ -127,10 +128,10 @@ def addon_fanart():
 		or 'special://home/addons/plugin.video.mando/resources/media/fanart.jpg'
 	)
 
-MEDIA_GITHUB_USER = 'The-Red-Wizard'
-MEDIA_GITHUB_REPO = 'TheRedWizard.github.io'
+MEDIA_GITHUB_USER = 'kodiwind'
+MEDIA_GITHUB_REPO = 'proximus'
 MEDIA_GITHUB_RAW = 'https://raw.githubusercontent.com/%s/%s/main/packages/media' % (MEDIA_GITHUB_USER, MEDIA_GITHUB_REPO)
-LEGACY_MEDIA_GITHUB_RAW = 'https://raw.githubusercontent.com/TheRedWizard/TheRedWizard.github.io/main/packages/media'
+LEGACY_MEDIA_GITHUB_RAW = 'https://raw.githubusercontent.com/kodiwind/proximus.github.io/main/packages/media'
 
 def media_github_credentials():
 	return MEDIA_GITHUB_USER, MEDIA_GITHUB_REPO
@@ -348,12 +349,24 @@ def reload_skin():
 def kodi_refresh():
 	execute_builtin('UpdateLibrary(video,special://skin/foo)')
 
-def refresh_widgets():
+def schedule_widget_refresh(silent=True, reload_skin=False):
+	url = 'plugin://plugin.video.mando/?mode=refresh_widgets&silent=%s&reload_skin=%s' % ('true' if silent else 'false', 'true' if reload_skin else 'false')
+	execute_builtin('AlarmClock(mando_widget_refresh,RunPlugin(%s),00:00:02,silent)' % url)
+
+def refresh_widgets(silent=False, reload_skin=False):
 	from caches.settings_cache import get_setting
 	from caches.random_widgets_cache import RandomWidgets
+	from caches.lists_cache import lists_cache
 	RandomWidgets().delete_like('random_list.%')
+	if reload_skin: lists_cache.delete_like('trakt_movies_trending_%')
 	kodi_refresh()
-	if get_setting('mando.widget_refresh_notification', 'true') == 'true': notification('Widgets Refreshed', 2500)
+	try:
+		if home(): container_refresh()
+	except: pass
+	if reload_skin:
+		try: execute_builtin('AlarmClock(mando_widget_skin,ReloadSkin(),00:00:01,silent)')
+		except: pass
+	if not silent and get_setting('mando.widget_refresh_notification', 'true') == 'true': notification('Widgets Refreshed', 2500)
 
 def run_plugin(params, block=False):
 	if isinstance(params, dict): params = build_url(params)
@@ -425,6 +438,10 @@ def jsonrpc_get_system_setting(setting_id, setting_value=''):
 	return result
 
 def open_settings():
+	try:
+		from apis.aiostreams_api import refresh_settings_properties
+		refresh_settings_properties()
+	except: pass
 	from windows.base_window import open_window
 	open_window(('windows.settings_manager', 'SettingsManager'), 'settings_manager.xml')
 
