@@ -4,7 +4,6 @@ import json
 from modules.metadata import movie_meta, movieset_meta
 from modules.utils import get_datetime, get_current_timestamp, paginate_list, jsondate_to_datetime, TaskPool, manual_function_import
 from modules import kodi_utils, settings, watched_status
-# logger = kodi_utils.logger
 
 class Movies:
 	main = ('tmdb_movies_popular', 'tmdb_movies_popular_today','tmdb_movies_blockbusters','tmdb_movies_in_theaters', 'tmdb_movies_upcoming',
@@ -13,8 +12,13 @@ class Movies:
 	'tmdb_movies_genres', 'tmdb_movies_companies', 'tmdb_movies_search', 'tmdb_movie_keyword_results', 'tmdb_movie_keyword_results_direct', 'ai_similar')
 	personal = {'in_progress_movies': ('modules.watched_status', 'get_in_progress_movies'), 'favorites_movies': ('modules.favorites', 'get_favorites'),
 	'watched_movies': ('modules.watched_status', 'get_watched_items'), 'recent_watched_movies': ('modules.watched_status', 'get_recently_watched')}
-	trakt_main = ('trakt_movies_trending', 'trakt_movies_trending_recent', 'trakt_movies_most_watched', 'trakt_movies_most_favorited', 'trakt_movies_top10_boxoffice')
+	most_watched = ('movies_most_watched', 'trakt_movies_most_watched')
+	trakt_main = ('trakt_movies_trending', 'trakt_movies_trending_recent', 'trakt_movies_most_favorited', 'trakt_movies_top10_boxoffice')
 	trakt_personal = ('trakt_collection', 'trakt_watchlist', 'trakt_collection_lists', 'trakt_watchlist_lists', 'trakt_favorites')
+	simkl_personal = ('simkl_plantowatch', 'simkl_completed', 'simkl_watching', 'simkl_hold', 'simkl_dropped')
+	punchplay_personal = ('punchplay_watchlist', 'punchplay_collection', 'punchplay_favorites', 'punchplay_plantowatch',
+		'punchplay_watching', 'punchplay_hold', 'punchplay_completed', 'punchplay_dropped')
+	mdblist_personal = ('mdblist_watchlist', 'mdblist_collection')
 
 	def __init__(self, params):
 		self.params = params
@@ -25,7 +29,7 @@ class Movies:
 		self.items, self.new_page, self.total_pages, self.is_external = [], {}, None, kodi_utils.external()
 		if self.is_external:
 			self.widget_hide_next_page = settings.widget_hide_next_page()
-			self.widget_hide_watched = self.action not in ('watched_movies', 'recent_watched_movies') and settings.widget_hide_watched()
+			self.widget_hide_watched = self.action not in ('watched_movies', 'recent_watched_movies', 'in_progress_movies') and settings.widget_hide_watched()
 		else: self.widget_hide_next_page, self.widget_hide_watched = False, False
 		self.playback_key = settings.playback_key()
 		self.play_mode = 'playback.%s' % settings.playback_key()
@@ -40,10 +44,14 @@ class Movies:
 			try: page_no = int(self.params_get('new_page', '1'))
 			except: page_no = self.params_get('new_page')
 			if self.action in self.personal: var_module, import_function = self.personal[self.action]
+			elif self.action in self.most_watched:
+				from modules.most_watched import normalize_most_watched_action
+				var_module, import_function = 'modules.most_watched', normalize_most_watched_action(self.action)
 			else: var_module, import_function = 'apis.%s_api' % self.action.split('_')[0], self.action
 			try: function = manual_function_import(var_module, import_function)
 			except: pass
-			if page_no == 1 and not self.is_external: kodi_utils.set_property('mando.exit_params', kodi_utils.folder_path())
+			if page_no == 1 and not self.is_external and self.action != 'mdblist_user_list':
+				kodi_utils.set_browse_exit_params('movie', self.action)
 			if self.action in self.main:
 				data = function(page_no)
 				results = data['results']
@@ -51,7 +59,9 @@ class Movies:
 				if data['total_pages'] > page_no: self.new_page = {'new_page': str(data['page'] + 1)}
 			elif self.action in self.special:
 				key_id = self.params_get('key_id') or self.params_get('query')
-				if not key_id: return
+				if not key_id:
+					kodi_utils.end_directory(handle)
+					return
 				data = function(key_id, page_no)
 				results = data['results']
 				self.list = [i['id'] for i in results]
@@ -62,6 +72,17 @@ class Movies:
 				self.list = [i['media_id'] for i in data]
 				if total_pages > 2: self.total_pages = total_pages
 				if total_pages > page_no: self.new_page = {'new_page': str(page_no + 1), 'paginate_start': self.paginate_start}
+			elif self.action in self.most_watched:
+				from modules.most_watched import most_watched_category_name, simkl_most_watched_has_next, most_watched_provider, normalize_most_watched_action
+				category_name = most_watched_category_name(self.action)
+				if category_name: self.category_name = category_name
+				self.id_type = 'trakt_dict'
+				data = function(page_no) or []
+				try: self.list = [i['movie']['ids'] for i in data]
+				except: self.list = [i['ids'] for i in data]
+				if most_watched_provider() == 'simkl' and data and simkl_most_watched_has_next(normalize_most_watched_action(self.action), page_no):
+					self.new_page = {'new_page': str(page_no + 1)}
+				elif data: self.new_page = {'new_page': str(page_no + 1)}
 			elif self.action in self.trakt_main:
 				self.id_type = 'trakt_dict'
 				data = function(page_no)
@@ -78,6 +99,52 @@ class Movies:
 				try:
 					if total_pages > page_no: self.new_page = {'new_page': str(page_no + 1), 'paginate_start': self.paginate_start}
 				except: pass
+			elif self.action in self.simkl_personal:
+				self.id_type = 'trakt_dict'
+				data = function('movies', page_no)
+				data, total_pages = self.paginate_list(data, page_no)
+				self.list = [i['media_ids'] for i in data]
+				if total_pages > 2: self.total_pages = total_pages
+				try:
+					if total_pages > page_no: self.new_page = {'new_page': str(page_no + 1), 'paginate_start': self.paginate_start}
+				except: pass
+			elif self.action in self.punchplay_personal:
+				self.id_type = 'trakt_dict'
+				data = function('movies', page_no)
+				data, total_pages = self.paginate_list(data, page_no)
+				self.list = [i['media_ids'] for i in data]
+				if total_pages > 2: self.total_pages = total_pages
+				try:
+					if total_pages > page_no: self.new_page = {'new_page': str(page_no + 1), 'paginate_start': self.paginate_start}
+				except: pass
+			elif self.action == 'punchplay_user_list':
+				self.id_type = 'trakt_dict'
+				from apis.punchplay_api import punchplay_list_items
+				data = punchplay_list_items(self.params_get('list_id'), 'movies')
+				data, total_pages = self.paginate_list(data, page_no)
+				self.list = [i['media_ids'] for i in data]
+				try:
+					if total_pages > page_no: self.new_page = {'new_page': str(page_no + 1), 'paginate_start': self.paginate_start}
+				except: pass
+			elif self.action in self.mdblist_personal:
+				data = function('movies', page_no)
+				if isinstance(data, tuple): data, total_pages = data
+				else: data, total_pages = data, 1
+				if self.action == 'mdblist_watchlist':
+					self.id_type = 'tmdb_id'
+					self.list = []
+					for i in data:
+						if not isinstance(i, dict): continue
+						tmdb_id = i.get('id') or i.get('tmdb') or (i.get('ids') or {}).get('tmdb')
+						if tmdb_id:
+							try: self.list.append(int(tmdb_id))
+							except: pass
+				else:
+					self.id_type = 'trakt_dict'
+					self.list = [{'tmdb': i['id'], 'imdb': i.get('imdb_id') or i.get('imdb') or '', 'tvdb': i.get('tvdb_id') or ''} for i in data if i.get('id')]
+				if total_pages > page_no: self.new_page = {'new_page': str(page_no + 1), 'paginate_start': self.paginate_start}
+			elif self.action == 'mdblist_user_list':
+				self.list = self.params_get('list', [])
 			elif self.action == 'trakt_recommendations':
 				self.id_type = 'trakt_dict'
 				data = function('movies')
@@ -110,7 +177,10 @@ class Movies:
 				if self.params_get('get_imdb'):
 					key_id = movie_meta('tmdb_id', key_id, self.tmdb_api_key, settings.mpaa_region(), get_datetime(), get_current_timestamp())['imdb_id']
 				self.list = imdb_more_like_this(key_id)
-			kodi_utils.add_items(handle, self.worker())
+			items = self.worker()
+			if self.action == 'mdblist_watchlist' and self.list and not items:
+				kodi_utils.logger('MDBList Watchlist', 'Failed to build list items from %s ids' % len(self.list))
+			kodi_utils.add_items(handle, items)
 			if self.total_pages and self.total_pages > 2 and settings.jump_to_enabled() and not self.is_external:
 				url_params = json.dumps({**self.new_page, **{'mode': 'build_movie_list', 'action': self.action, 'category_name': self.category_name}})
 				kodi_utils.add_dir(handle, {'mode': 'navigate_to_page_choice', 'current_page': page_no, 'total_pages': self.total_pages, 'url_params': url_params},
@@ -118,17 +188,19 @@ class Movies:
 			if self.new_page and not self.widget_hide_next_page:
 				self.new_page.update({'mode': 'build_movie_list', 'action': self.action, 'category_name': self.category_name})
 				kodi_utils.add_dir(handle, self.new_page, 'Next Page (%s) >>' % self.new_page['new_page'], 'nextpage', kodi_utils.get_icon('nextpage_landscape'))
-		except: pass
+		except Exception as e:
+			if self.action in self.mdblist_personal or self.action == 'mdblist_user_list':
+				kodi_utils.logger('MDBList List Error', '%s: %s' % (self.action, e))
 		kodi_utils.set_content(handle, 'movies')
 		kodi_utils.set_category(handle, self.category_name)
-		kodi_utils.end_directory(handle, cacheToDisc=False if self.is_external else True)
+		kodi_utils.end_directory(handle, cacheToDisc=False if self.is_external or self.action in self.mdblist_personal else True)
 		if not self.is_external:
 			if self.params_get('refreshed') == 'true': kodi_utils.sleep(1000)
 			kodi_utils.set_view_mode('view.movies', 'movies', self.is_external)
 		
-	def build_movie_content(self, _position, _id):
+	def build_movie_content(self, _position, _id, dbcon=None):
 		try:
-			meta = movie_meta(self.id_type, _id, self.tmdb_api_key, self.mpaa_region, self.current_date, self.current_time)
+			meta = movie_meta(self.id_type, _id, self.tmdb_api_key, self.mpaa_region, self.current_date, self.current_time, dbcon=dbcon)
 			if not meta or 'blank_entry' in meta: return
 			listitem = self.make_listitem()
 			cm = []
@@ -166,23 +238,50 @@ class Movies:
 										'name': 'More Like This based on %s' % title})
 			browse_similar_params = self.build_url({'mode': 'build_movie_list', 'action': 'ai_similar', 'is_external': self.is_external,
 										'key_id': 'movie|%s' % tmdb_id, 'name': 'Similar based on %s' % title})
-			browse_in_trakt_list_params = self.build_url({'mode': 'trakt.list.in_trakt_lists', 'media_type': 'movie', 'imdb_id': imdb_id, 'is_external': self.is_external,
+			browse_in_trakt_list_params, trakt_manager_params = '', ''
+			if settings.trakt_user_active():
+				browse_in_trakt_list_params = self.build_url({'mode': 'trakt.list.in_trakt_lists', 'media_type': 'movie', 'imdb_id': imdb_id, 'is_external': self.is_external,
 										'category_name': '%s In Trakt Lists' % title})
-			trakt_manager_params = self.build_url({'mode': 'trakt_manager_choice', 'tmdb_id': tmdb_id, 'imdb_id': imdb_id, 'tvdb_id': 'None', 'media_type': 'movie', 'icon': poster})
+				trakt_manager_params = self.build_url({'mode': 'trakt_manager_choice', 'tmdb_id': tmdb_id, 'imdb_id': imdb_id, 'tvdb_id': 'None', 'media_type': 'movie',
+													'title': title, 'icon': poster})
+			simkl_manager_params = ''
+			if settings.simkl_user_active():
+				simkl_manager_params = self.build_url({'mode': 'simkl_manager_choice', 'tmdb_id': tmdb_id, 'imdb_id': imdb_id, 'tvdb_id': 'None', 'media_type': 'movie',
+														'title': title, 'icon': poster})
+			punchplay_manager_params = ''
+			if settings.punchplay_user_active():
+				punchplay_manager_params = self.build_url({'mode': 'punchplay_manager_choice', 'tmdb_id': tmdb_id, 'imdb_id': imdb_id, 'tvdb_id': 'None', 'media_type': 'movie',
+														'title': title, 'icon': poster})
+			mdblist_manager_params = ''
+			if settings.mdblist_user_active():
+				mdblist_manager_params = self.build_url({'mode': 'mdblist_manager_choice', 'tmdb_id': tmdb_id, 'imdb_id': imdb_id, 'tvdb_id': 'None', 'media_type': 'movie',
+														'title': title, 'icon': poster})
 			personal_manager_params = self.build_url({'mode': 'personallists_manager_choice', 'list_type': 'movie', 'tmdb_id': tmdb_id, 'title': title,
 										'premiered': premiered, 'current_time': self.current_time, 'icon': poster})
-			tmdb_manager_params = self.build_url({'mode': 'tmdblists_manager_choice', 'media_type': 'movie', 'tmdb_id': tmdb_id, 'icon': poster})
+			tmdb_manager_params = ''
+			if settings.tmdblist_user_active():
+				tmdb_manager_params = self.build_url({'mode': 'tmdblists_manager_choice', 'media_type': 'movie', 'tmdb_id': tmdb_id, 'icon': poster})
 			favorites_manager_params = self.build_url({'mode': 'favorites_manager_choice', 'media_type': 'movie', 'tmdb_id': tmdb_id, 'title': title})
 			belongs_to_movieset = 'true' if all([movieset_id, movieset_name]) else 'false'
-			movieset_active = self.open_movieset and belongs_to_movieset == 'true'
-			if self.open_extras or movieset_active: cm_append(['extras', ('[B]Play[/B]', 'RunPlugin(%s)' % play_params)])
-			if not self.open_extras or movieset_active: cm_append(['extras', ('[B]Extras[/B]', 'RunPlugin(%s)' % extras_params)])
-			if movieset_active: url_params = self.build_url({'mode': 'open_movieset_choice', 'key_id': movieset_id, 'name': movieset_name, 'is_external': self.is_external})
-			elif self.open_extras: url_params = extras_params
-			else: url_params = play_params
+			skip_special = self.skip_inprogress and progress
+			item_open_extras = self.open_extras and not skip_special
+			item_open_movieset = self.open_movieset and not skip_special
+			movieset_active = item_open_movieset and belongs_to_movieset == 'true'
+			if item_open_extras or movieset_active:
+				cm_append(['extras', ('[B]Play[/B]', 'RunPlugin(%s)' % play_params)])
+			if not item_open_extras or movieset_active:
+				cm_append(['extras', ('[B]Extras[/B]', 'RunPlugin(%s)' % extras_params)])
+			if movieset_active:
+				url_params = self.build_url({'mode': 'open_movieset_choice', 'key_id': movieset_id, 'name': movieset_name, 'is_external': self.is_external})
+			elif item_open_extras:
+				url_params = extras_params
+			else:
+				url_params = play_params
 			cm_append(['options', ('[B]Options[/B]', 'RunPlugin(%s)' % options_params)])
 			cm_append(['playback_options', ('[B]Play Options[/B]', 'RunPlugin(%s)' % playback_options_params)])
-			if belongs_to_movieset == 'true' and not self.movieset_list_active and not self.open_movieset:
+			settings.append_source_shortcut_context_menus(cm_append, self.build_url, self.cm_sort_order, 'movie', tmdb_id)
+			settings.append_external_scraper_settings_cm(cm_append, self.build_url)
+			if belongs_to_movieset == 'true' and not self.movieset_list_active and not item_open_movieset:
 				browse_movie_set_params = self.build_url({'mode': 'build_movie_list', 'action': 'tmdb_movies_sets', 'key_id': movieset_id,
 										'name': movieset_name, 'is_external': self.is_external})
 				cm_append(['browse_movie_set', ('[B]Browse Movie Set[/B]', self.window_command % browse_movie_set_params)])
@@ -191,10 +290,14 @@ class Movies:
 			cm_append(['related', ('[B]Browse Related[/B]', self.window_command % browse_related_params)])
 			cm_append(['more_like_this', ('[B]Browse More Like This[/B]', self.window_command % browse_more_like_this_params)])
 			if self.ai_model_active: cm_append(['similar', ('[B]Browse Similar[/B]', self.window_command % browse_similar_params)])
-			cm_append(['in_trakt_list', ('[B]In Trakt Lists[/B]', self.window_command % browse_in_trakt_list_params)])
-			cm_append(['trakt_manager', ('[B]Trakt Lists Manager[/B]', 'RunPlugin(%s)' % trakt_manager_params)])
+			if browse_in_trakt_list_params: cm_append(['in_trakt_list', ('[B]In Trakt Lists[/B]', self.window_command % browse_in_trakt_list_params)])
+			if mdblist_manager_params: cm_append(['mdblist_manager', ('[B]MDBList Manager[/B]', 'RunPlugin(%s)' % mdblist_manager_params)])
+			if punchplay_manager_params: cm_append(['punchplay_manager', ('[B]PunchPlay Manager[/B]', 'RunPlugin(%s)' % punchplay_manager_params)])
+			if simkl_manager_params: cm_append(['simkl_manager', ('[B]Simkl Lists Manager[/B]', 'RunPlugin(%s)' % simkl_manager_params)])
+			if tmdb_manager_params: cm_append(['tmdb_manager', ('[B]TMDb Lists Manager[/B]', 'RunPlugin(%s)' % tmdb_manager_params)])
+			if trakt_manager_params: cm_append(['trakt_manager', ('[B]Trakt Lists Manager[/B]', 'RunPlugin(%s)' % trakt_manager_params)])
+			settings.append_list_shortcut_context_menus(cm_append, self.build_url, self.cm_sort_order, 'movie', tmdb_id, imdb_id, 'None', title, poster)
 			cm_append(['personal_manager', ('[B]Personal Lists Manager[/B]', 'RunPlugin(%s)' % personal_manager_params)])
-			cm_append(['tmdb_manager', ('[B]TMDb Lists Manager[/B]', 'RunPlugin(%s)' % tmdb_manager_params)])
 			cm_append(['favorites_manager', ('[B]Favorites Manager[/B]', 'RunPlugin(%s)' % favorites_manager_params)])
 			if playcount:
 				if self.widget_hide_watched: return
@@ -222,7 +325,9 @@ class Movies:
 			cast = meta_get('short_cast', []) or meta_get('cast', []) or []
 			info_tag.setCast([self.kodi_actor(name=item['name'], role=item['role'], thumbnail=item['thumbnail']) for item in cast])
 			if progress:
-				info_tag.setResumePoint(watched_status.get_resume_seconds(progress, duration))
+				# Time only — total would make Kodi/skins show a resume dialog we cannot honour.
+				resume_secs = watched_status.get_resume_seconds(progress, duration)
+				info_tag.setResumePoint(resume_secs)
 				set_properties({'WatchedProgress': progress})
 			listitem.setLabel(title)
 			listitem.addContextMenuItems(cm)
@@ -239,6 +344,9 @@ class Movies:
 				'mando.browse_similar_params': browse_similar_params,
 				'mando.browse_in_trakt_list_params': browse_in_trakt_list_params,
 				'mando.trakt_manager_params': trakt_manager_params,
+				'mando.simkl_manager_params': simkl_manager_params,
+				'mando.punchplay_manager_params': punchplay_manager_params,
+				'mando.mdblist_manager_params': mdblist_manager_params,
 				'mando.personal_manager_params': personal_manager_params,
 				'mando.tmdb_manager_params': tmdb_manager_params,
 				'mando.favorites_manager_params': favorites_manager_params
@@ -262,11 +370,12 @@ class Movies:
 		open_action = settings.media_open_action('movie')
 		self.open_movieset = open_action in (2, 3) and not self.movieset_list_active
 		self.open_extras = open_action in (1, 3)
+		self.skip_inprogress = settings.media_open_action_skip_inprogress_movie()
 		if self.custom_order:
-			threads = TaskPool().tasks(self.build_movie_content, self.list, min(len(self.list), settings.max_threads()))
+			threads = TaskPool().tasks(self.build_movie_content, self.list, min(len(self.list), settings.max_threads()), 'metacache_db')
 			[i.join() for i in threads]
 		else:
-			threads = TaskPool().tasks_enumerate(self.build_movie_content, self.list, min(len(self.list), settings.max_threads()))
+			threads = TaskPool().tasks_enumerate(self.build_movie_content, self.list, min(len(self.list), settings.max_threads()), 'metacache_db')
 			[i.join() for i in threads]
 			self.items.sort(key=lambda k: k[1])
 			self.items = [i[0] for i in self.items]

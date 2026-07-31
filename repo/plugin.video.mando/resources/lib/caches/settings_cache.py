@@ -13,14 +13,106 @@ _MAX_PROPERTY_LEN = 8192
 _SETTINGS_PROPERTIES_LOADED = 'mando.settings_properties_loaded'
 _DEFERRED_SETUP_DONE = 'mando.deferred_service_setup_done'
 _SETTINGS_DB_MIGRATED = 'mando.settings_db_migrated'
+_SETTINGS_WIDGETS_MIGRATED = 'mando.settings_widgets_migrated'
 _SETTINGS_DB_SYNCED = 'mando.settings_db_synced'
+_SETTINGS_SYNC_FINGERPRINT = 'mando.settings_sync_fingerprint'
 _WIDGET_REFRESH_SCHEDULED = 'mando.widgets_refresh_scheduled'
+_SERVICE_AUTH_VISIBILITY_SETTINGS = frozenset((
+	'rd.token', 'pm.token', 'ad.token', 'oc.token', 'tb.token',
+	'easynews_user', 'easynews_password',
+))
+# Meta account auth — Home props drive Meta Accounts sync-row visibility while Settings stays open.
+_META_AUTH_VISIBILITY_SETTINGS = frozenset((
+	'trakt.user', 'trakt.token', 'simkl.user', 'simkl.token',
+	'mdblist.user', 'mdblist.token',
+	'punchplay.user', 'punchplay.token', 'punchplay.client',
+	'wetrakr.user', 'wetrakr.token',
+))
+_NEW_SETTING_VALUE_MIGRATIONS = {
+	'trakt.calendar_display': 'single_ep_display',
+	'trakt.calendar_display_widget': 'single_ep_display_widget',
+}
 _bootstrap_lock = Lock()
 _DEFAULTS_LIST = None
 _DEFAULTS_MAP = None
 
 def _properties_loaded():
 	return kodi_utils.get_property(_SETTINGS_PROPERTIES_LOADED) == 'true'
+
+def _settings_schema_token():
+	return '%s:%s' % (kodi_utils.addon_info('version'), len(default_settings()))
+
+def compute_settings_sync_fingerprint():
+	return _settings_schema_token()
+
+def mark_settings_sync_complete():
+	kodi_utils.set_property(_SETTINGS_SYNC_FINGERPRINT, compute_settings_sync_fingerprint())
+
+def settings_sync_needed():
+	if kodi_utils.get_property(_SETTINGS_DB_SYNCED) != 'true':
+		return True
+	stored = kodi_utils.get_property(_SETTINGS_SYNC_FINGERPRINT) or ''
+	return stored != compute_settings_sync_fingerprint()
+
+def clear_settings_boot_state(clear_deferred=True):
+	kodi_utils.clear_property(_SETTINGS_SYNC_FINGERPRINT)
+	kodi_utils.clear_property(_SETTINGS_DB_SYNCED)
+	kodi_utils.clear_property(_SETTINGS_PROPERTIES_LOADED)
+	kodi_utils.clear_property(_SETTINGS_DB_MIGRATED)
+	kodi_utils.clear_property(_SETTINGS_WIDGETS_MIGRATED)
+	if clear_deferred:
+		kodi_utils.clear_property(_DEFERRED_SETUP_DONE)
+
+def bootstrap_settings_needed():
+	if not _properties_loaded():
+		return True
+	if kodi_utils.get_property(_SETTINGS_DB_MIGRATED) == 'true':
+		return True
+	if kodi_utils.get_property(_DEFERRED_SETUP_DONE) != 'true':
+		return True
+	return False
+
+def widgets_refresh_after_migration_needed():
+	return kodi_utils.get_property(_SETTINGS_WIDGETS_MIGRATED) == 'true'
+
+def service_bootstrap_needed():
+	return bootstrap_settings_needed() or widgets_refresh_after_migration_needed()
+
+def _new_settings_affect_widgets(insert_list):
+	for item in insert_list:
+		setting_id = item[0]
+		if setting_id.startswith('migration.'):
+			continue
+		return True
+	return False
+
+def _new_setting_value(setting_id, setting_default, currentsettings, had_existing_settings, fresh_install=False) -> str:
+	if not had_existing_settings:
+		# A genuine fresh install has nothing to migrate, but migrate_legacy_sort_settings() reads each
+		# absent legacy id as its own old getter fallback, so it would write six override rows for a user
+		# who has never touched a sort setting - breaking list_sort_cache's "a row means the user
+		# overrode this list" invariant. Seed the sentinel as already done so it never runs here.
+		#
+		# fresh_install, not had_existing_settings: the caller's dict comes from get_all(), which
+		# answers {} for a locked or corrupt database too. Seeding 'true' on that mistake would skip the
+		# migration forever - the next healthy sync reads the sentinel, never runs it, and the obsolete
+		# purge then deletes the five legacy ids and with them the only copy of the user's orderings.
+		if setting_id == 'migration.unified_list_sort': return 'true' if fresh_install else setting_default
+		return setting_default
+	old_setting_id = _NEW_SETTING_VALUE_MIGRATIONS.get(setting_id)
+	if not old_setting_id:
+		return setting_default
+	return currentsettings.get(old_setting_id, setting_default)
+
+_CREDENTIAL_STRING_SETTINGS = frozenset(('tmdb_api', 'trakt.client', 'trakt.secret', 'tmdb.lists_read_token', 'omdb_api'))
+
+def normalize_credential_string(value):
+	if value in (None, 'empty_setting'): return ''
+	return str(value).strip()
+
+def looks_like_tmdb_v4_jwt(value):
+	value = normalize_credential_string(value)
+	return len(value) > 48 and value.startswith('eyJ') and value.count('.') >= 2
 
 def property_safe_string(value):
 	if value is None: return ''
@@ -59,6 +151,57 @@ def sanitize_setting_value(setting_id, value, setting_info=None, validate_paths=
 	if setting_info and setting_info.get('setting_type') == 'boolean':
 		if value in ('true', 'false'): return value
 		return default
+	if setting_id == 'watched_indicators':
+		from modules.settings import watched_provider_options
+		value = str(value)
+		opts = watched_provider_options()
+		if value in opts: return value
+		if value == '1':
+			from caches.settings_cache import settings_cache
+			token = settings_cache.read_db_value('trakt.token')
+			if token not in (None, '0', '', 'empty_setting'): return value
+		if value == '2':
+			from modules.settings import simkl_user_active
+			if simkl_user_active(): return value
+		if value == '3':
+			from modules.settings import mdblist_user_active
+			if mdblist_user_active(): return value
+		if value == '4':
+			from modules.settings import punchplay_user_active
+			if punchplay_user_active(): return value
+		return '0'
+	if setting_id == 'recommend_service':
+		from modules.settings import recommend_service_options
+		value = str(value)
+		opts = recommend_service_options()
+		if value in opts: return value
+		return '0'
+	if setting_id == 'playback.subs_source':
+		from modules.settings import subtitles_source_options
+		value = str(value)
+		opts = subtitles_source_options()
+		if value in opts: return value
+		if value == '2':
+			return '1' if '1' in opts else '0'
+		if value == '1':
+			return '2' if '2' in opts else '0'
+		return '0'
+	if setting_id in ('stinger_alert.alert_timing', 'autoplay_alert_timing', 'autoscrape_alert_timing'):
+		from modules.settings import alert_timing_options
+		value = str(value)
+		opts = alert_timing_options(next_episode=(setting_id != 'stinger_alert.alert_timing'))
+		if value in opts: return value
+		if value == '2':
+			return '1' if '1' in opts else '0'
+		return default if default in opts else ('1' if '1' in opts else '0')
+	if setting_id == 'external_scraper.run_mode':
+		value = str(value)
+		opts = default_setting_values(setting_id)
+		if opts and value in opts.get('settings_options', {}): return value
+		return default if default in (opts or {}).get('settings_options', {}) else '1'
+	if setting_id in _CREDENTIAL_STRING_SETTINGS:
+		if value in (None, 'empty_setting', ''): return default if value is None else value
+		return normalize_credential_string(value)
 	if len(value) > _MAX_PROPERTY_LEN: return value[:_MAX_PROPERTY_LEN]
 	return value
 
@@ -73,13 +216,13 @@ class SettingsCache:
 
 	def _warm_db_cache(self):
 		if self._db_warmed: return
+		self._db_warmed = True
 		try:
 			for setting_id, setting_value in self.get_all().items():
 				setting_info = default_setting_values(setting_id)
 				if setting_info: setting_value = sanitize_setting_value(setting_id, setting_value, setting_info, validate_paths=False)
 				else: setting_value = property_safe_string(setting_value)
 				self._db_cache[setting_id] = setting_value
-			self._db_warmed = True
 		except: pass
 
 	def read_db_value(self, setting_id, validate_paths=False):
@@ -125,6 +268,23 @@ class SettingsCache:
 		except: all_settings = {}
 		return all_settings
 
+	def is_empty_strict(self):
+		"""True only when this profile genuinely holds no settings. Raises rather than guessing.
+
+		get_all() swallows every sqlite error and answers {}, so its empty dict cannot tell a fresh
+		install from a database that is locked, corrupt or unreadable. Anything deciding "this profile
+		has never been written to" has to ask a question that is allowed to fail. An absent file and an
+		absent table are both genuinely empty - the service creates them on first run.
+		"""
+		from caches.base_cache import database_locations
+		if not kodi_utils.path_exists(database_locations('settings_db')): return True
+		dbcon = connect_database('settings_db')
+		try: row = dbcon.execute('SELECT setting_id FROM settings LIMIT 1').fetchone()
+		except Exception as error:
+			if 'no such table' in str(error).lower(): return True
+			raise
+		return row is None
+
 	def set(self, setting_id, setting_value=None):
 		setting_id = setting_id.replace('mando.', '')
 		self._db_cache.pop(setting_id, None)
@@ -135,12 +295,78 @@ class SettingsCache:
 		setting_type, setting_default = setting_info['setting_type'], setting_info['setting_default']
 		if setting_value is None: setting_value = setting_default
 		setting_value = sanitize_setting_value(setting_id, setting_value, setting_info)
+		instance_switch = None
+		if setting_id == 'aiostreams.instance':
+			old_instance = str(self.read_db_value('aiostreams.instance') or '0')
+			new_instance = str(setting_value)
+			if old_instance != new_instance:
+				instance_switch = new_instance
+				try:
+					from apis.aiostreams_api import persist_active_profile
+					persist_active_profile(old_instance)
+				except: pass
 		dbcon.execute('INSERT OR REPLACE INTO settings VALUES (?, ?, ?, ?)', (setting_id, setting_type, setting_default, setting_value))
+		if instance_switch is not None:
+			try:
+				from apis.aiostreams_api import apply_profile
+				apply_profile(instance_switch)
+			except: pass
 		if _properties_loaded():
 			self.set_memory_cache(setting_id, setting_value)
+			if setting_id in _SERVICE_AUTH_VISIBILITY_SETTINGS:
+				try:
+					from modules.service_expiry import publish_settings_expiry_properties
+					publish_settings_expiry_properties()
+				except: pass
+			if setting_id in _META_AUTH_VISIBILITY_SETTINGS:
+				try:
+					from modules.settings import watched_provider_options
+					opts = watched_provider_options()
+					current = str(self.read_db_value('watched_indicators') or '0')
+					label = opts.get(current) or opts.get('0', 'Mando')
+					self.set_memory_cache('watched_indicators_name', label)
+				except: pass
+				try:
+					from modules.settings import recommend_service_options
+					opts = recommend_service_options()
+					current = str(self.read_db_value('recommend_service') or '0')
+					if current not in opts:
+						current = '0'
+						self.write_db('recommend_service', current)
+						self.set_memory_cache('recommend_service', current)
+					self.set_memory_cache('recommend_service_name', opts.get(current, opts['0']))
+				except: pass
+			if setting_id in ('google_api', 'groq_api'):
+				try:
+					from modules.settings import recommend_service_options
+					opts = recommend_service_options()
+					current = str(self.read_db_value('recommend_service') or '0')
+					if current not in opts:
+						current = '0'
+						self.write_db('recommend_service', current)
+						self.set_memory_cache('recommend_service', current)
+					self.set_memory_cache('recommend_service_name', opts.get(current, opts['0']))
+				except: pass
 		if setting_type == 'action' and 'settings_options' in setting_info:
 			name_setting_id = '%s_name' % setting_id
-			name_setting_value = setting_info['settings_options'][setting_value]
+			if setting_id == 'watched_indicators':
+				from modules.settings import watched_provider_options
+				opts = watched_provider_options()
+				name_setting_value = opts.get(str(setting_value)) or setting_info['settings_options'].get(str(setting_value), opts['0'])
+			elif setting_id == 'recommend_service':
+				from modules.settings import recommend_service_options
+				opts = recommend_service_options()
+				name_setting_value = opts.get(str(setting_value)) or setting_info['settings_options'].get(str(setting_value), opts['0'])
+			elif setting_id == 'playback.subs_source':
+				from modules.settings import subtitles_source_options
+				opts = subtitles_source_options()
+				name_setting_value = opts.get(str(setting_value), opts['0'])
+			elif setting_id in ('stinger_alert.alert_timing', 'autoplay_alert_timing', 'autoscrape_alert_timing'):
+				from modules.settings import alert_timing_options
+				opts = alert_timing_options(next_episode=(setting_id != 'stinger_alert.alert_timing'))
+				name_setting_value = opts.get(str(setting_value), opts.get('1', opts.get('0', '')))
+			else:
+				name_setting_value = setting_info['settings_options'][setting_value]
 			if setting_id == 'aiostreams.instance':
 				try:
 					from apis.aiostreams_api import INSTANCE_LABELS
@@ -217,9 +443,46 @@ def _apply_settings_properties_from_db():
 		else: sanitized = property_safe_string(value)
 		try: settings_cache.set_memory_cache(setting_id, sanitized)
 		except: pass
+		if setting_id == 'watched_indicators':
+			try:
+				from modules.settings import watched_provider_options
+				opts = watched_provider_options()
+				info = defaults_map.get(setting_id) or {}
+				static_opts = info.get('settings_options', {})
+				settings_cache.set_memory_cache('watched_indicators_name', opts.get(sanitized) or static_opts.get(sanitized, opts['0']))
+			except: pass
+		if setting_id == 'recommend_service':
+			try:
+				from modules.settings import recommend_service_options
+				opts = recommend_service_options()
+				info = defaults_map.get(setting_id) or {}
+				static_opts = info.get('settings_options', {})
+				settings_cache.set_memory_cache('recommend_service_name', opts.get(sanitized) or static_opts.get(sanitized, opts['0']))
+			except: pass
+		if setting_id == 'playback.subs_source':
+			try:
+				from modules.settings import subtitles_source_options
+				opts = subtitles_source_options()
+				settings_cache.set_memory_cache('playback.subs_source_name', opts.get(sanitized, opts['0']))
+			except: pass
+		if setting_id in ('stinger_alert.alert_timing', 'autoplay_alert_timing', 'autoscrape_alert_timing'):
+			try:
+				from modules.settings import alert_timing_options
+				opts = alert_timing_options(next_episode=(setting_id != 'stinger_alert.alert_timing'))
+				settings_cache.set_memory_cache('%s_name' % setting_id, opts.get(sanitized, opts.get('1', '')))
+			except: pass
+		elif setting_id == 'autoplay_skip_intro':
+			try:
+				opts = (defaults_map.get(setting_id) or {}).get('settings_options', {})
+				settings_cache.set_memory_cache('%s_name' % setting_id, opts.get(sanitized, opts.get('0', '')))
+			except: pass
 	try:
 		from apis.aiostreams_api import refresh_settings_properties
 		refresh_settings_properties()
+	except: pass
+	try:
+		from modules.settings import refresh_external_scraper_properties
+		refresh_external_scraper_properties()
 	except: pass
 	kodi_utils.set_property(_SETTINGS_PROPERTIES_LOADED, 'true')
 	settings_cache.clear_db_cache()
@@ -233,7 +496,40 @@ def _defaultsettings_ids(d_settings):
 	defaultsettings_ids.extend(['%s_name' % i for i in defaultsettings_names])
 	return defaultsettings_ids
 
+_ACTIVE_KODI_PROFILE = 'mando.active_kodi_profile'
+
+def sync_kodi_profile_context():
+	"""Reload settings properties when the active Kodi profile changes (multi-profile / shared Trakt)."""
+	try:
+		current = kodi_utils.translate_path(kodi_utils.addon_info('profile'))
+	except:
+		return False
+	if not current:
+		return False
+	kodi_utils.set_property('mando.addon_profile', current)
+	previous = kodi_utils.get_property(_ACTIVE_KODI_PROFILE) or ''
+	if previous != current:
+		kodi_utils.set_property(_ACTIVE_KODI_PROFILE, current)
+		kodi_utils.clear_property(_SETTINGS_PROPERTIES_LOADED)
+		settings_cache.clear_db_cache()
+		if kodi_utils.get_property(_SETTINGS_DB_SYNCED) == 'true':
+			_apply_settings_properties_from_db()
+		else:
+			bootstrap_settings_properties(force=True)
+		return True
+	if not _properties_loaded():
+		kodi_utils.set_property(_ACTIVE_KODI_PROFILE, current)
+		if kodi_utils.get_property(_SETTINGS_DB_SYNCED) == 'true':
+			_apply_settings_properties_from_db()
+		else:
+			bootstrap_settings_properties(force=True)
+		return True
+	if not previous:
+		kodi_utils.set_property(_ACTIVE_KODI_PROFILE, current)
+	return False
+
 def ensure_settings_properties_loaded():
+	sync_kodi_profile_context()
 	if _properties_loaded(): return False
 	with _bootstrap_lock:
 		if _properties_loaded(): return False
@@ -242,18 +538,39 @@ def ensure_settings_properties_loaded():
 			return True
 		return bootstrap_settings_properties()
 
+def refresh_settings_manager_properties():
+	"""Republish settings.db to Home props before Settings Manager opens (boolean toggles need this)."""
+	settings_cache.clear_db_cache()
+	_apply_settings_properties_from_db()
+	try:
+		from modules.settings import refresh_playback_subs_source, refresh_alert_timing_settings, refresh_external_scraper_properties
+		refresh_playback_subs_source()
+		refresh_alert_timing_settings()
+		refresh_external_scraper_properties()
+	except: pass
+	try:
+		from modules.service_expiry import publish_settings_expiry_properties
+		publish_settings_expiry_properties()
+	except: pass
+
 def bootstrap_settings_properties(force=False):
-	if not force and _properties_loaded(): return False
+	db_migrated = kodi_utils.get_property(_SETTINGS_DB_MIGRATED) == 'true'
+	if not force and _properties_loaded() and not db_migrated:
+		return False
 	with _bootstrap_lock:
-		if not force and _properties_loaded(): return False
+		db_migrated = kodi_utils.get_property(_SETTINGS_DB_MIGRATED) == 'true'
+		if not force and _properties_loaded() and not db_migrated:
+			return False
 		if force:
 			kodi_utils.clear_property(_SETTINGS_PROPERTIES_LOADED)
 			kodi_utils.clear_property(_SETTINGS_DB_SYNCED)
 		if force or kodi_utils.get_property(_SETTINGS_DB_SYNCED) != 'true':
-			sync_settings({'silent': 'true', 'load_properties': False})
+			sync_settings({'silent': 'true', 'load_properties': False, 'force': 'true'})
 		else:
 			kodi_utils.clear_property(_SETTINGS_PROPERTIES_LOADED)
 		_apply_settings_properties_from_db()
+		if db_migrated:
+			kodi_utils.clear_property(_SETTINGS_DB_MIGRATED)
 		return True
 
 def schedule_widget_refresh_once(reload_skin=False):
@@ -263,50 +580,237 @@ def schedule_widget_refresh_once(reload_skin=False):
 	except: pass
 
 def refresh_widgets_after_db_migration():
-	if kodi_utils.get_property(_SETTINGS_DB_MIGRATED) != 'true': return
-	kodi_utils.clear_property(_SETTINGS_DB_MIGRATED)
-	schedule_widget_refresh_once(reload_skin=True)
+	if kodi_utils.get_property(_SETTINGS_WIDGETS_MIGRATED) != 'true': return
+	kodi_utils.clear_property(_SETTINGS_WIDGETS_MIGRATED)
+	schedule_widget_refresh_once(reload_skin=not kodi_utils.is_android())
 
 def run_deferred_setup_if_needed():
+	run_deferred_setup_background_if_needed()
+
+def run_deferred_setup_background_if_needed():
 	if kodi_utils.get_property(_DEFERRED_SETUP_DONE) == 'true': return
 	kodi_utils.set_property(_DEFERRED_SETUP_DONE, 'true')
-	try:
-		from service import run_deferred_service_setup
-		run_deferred_service_setup()
-	except Exception as e:
-		kodi_utils.logger('run_deferred_setup_if_needed', str(e))
+	from threading import Thread
+	def _run():
+		try:
+			from service import run_deferred_service_setup
+			run_deferred_service_setup()
+		except Exception as e:
+			kodi_utils.logger('run_deferred_setup_if_needed', str(e))
+	Thread(target=_run, daemon=True).start()
+
+_DIRECTORY_LISTING_MODES = frozenset((
+	'build_movie_list', 'build_tvshow_list', 'build_season_list', 'build_episode_list',
+	'build_in_progress_episode', 'build_recently_watched_episode', 'build_next_episode',
+	'build_my_calendar', 'build_mdbl_calendar', 'build_punchplay_calendar', 'build_mdbl_next_up', 'build_next_episode_manager'))
+
+# The five settings the unified-list-sort migration reads. They are no longer in default_settings(),
+# so the obsolete-id purge in sync_settings() would delete them on the same pass that migrates them -
+# leaving nothing to retry from if the migration fails. The purge is deferred until the sentinel says
+# the migration succeeded, which happens in the same run, so they are removed on the following sync.
+_LEGACY_SORT_SETTING_IDS = frozenset((
+	'sort.watchlist', 'sort.collection', 'sort.simkl', 'tmdbsort.watchlist', 'tmdbsort.favorites'))
+
+def is_directory_listing_mode(mode):
+	if not mode: return False
+	if mode.startswith('navigator.'): return True
+	return mode in _DIRECTORY_LISTING_MODES
+
+def should_block_bootstrap_on_entry(mode):
+	"""Only block plugin entry when opening settings UI; listings read settings.db directly."""
+	if mode in ('open_settings', 'sync_settings'):
+		return True
+	if mode and mode.startswith('settings_manager.'):
+		return True
+	return False
 
 def load_settings_properties(force=False):
 	bootstrap_settings_properties(force=force)
 	refresh_widgets_after_db_migration()
 	run_deferred_setup_if_needed()
 
+def reload_after_settings_restore(imported_db_keys=()):
+	"""Reload caches after a settings backup import without stopping the addon service."""
+	clear_settings_boot_state(clear_deferred=True)
+	kodi_utils.clear_property(_WIDGET_REFRESH_SCHEDULED)
+	settings_cache.clear_db_cache()
+	imported = set(imported_db_keys or ())
+	if not imported or 'navigator_db' in imported:
+		try:
+			from caches.navigator_cache import navigator_cache
+			for list_name in navigator_cache.main_menus:
+				navigator_cache.delete_memory_cache(list_name, 'default')
+				navigator_cache.delete_memory_cache(list_name, 'edited')
+		except: pass
+	try:
+		sync_settings({'silent': 'true', 'load_properties': False})
+	except Exception as e:
+		kodi_utils.logger('reload_after_settings_restore', 'sync: %s' % e)
+	try:
+		kodi_utils.ensure_addon_xml_from_settings(force=True)
+	except Exception as e:
+		kodi_utils.logger('reload_after_settings_restore', 'addon_xml: %s' % e)
+	from threading import Thread
+	def _bootstrap():
+		try:
+			bootstrap_settings_properties(force=True)
+			run_deferred_setup_background_if_needed()
+			schedule_widget_refresh_once(reload_skin=False)
+		except Exception as e:
+			kodi_utils.logger('reload_after_settings_restore', 'bootstrap: %s' % e)
+	Thread(target=_bootstrap, daemon=True).start()
+
 def sync_settings(params={}):
 	silent = params.get('silent', 'true') == 'true'
-	load_properties = params.get('load_properties', True)
+	force = params.get('force', False) == 'true'
+	if 'load_properties' in params:
+		load_properties = params.get('load_properties', True) == 'true'
+	else:
+		# AM Lite and boot service sync update settings.db only; full property reload is for Remake Settings Cache.
+		load_properties = not silent
+	if not force and not load_properties and not settings_sync_needed():
+		return 'skipped'
 	migrated = False
+	widgets_migrated = False
 	insert_list = []
 	insert_list_append = insert_list.append
 	currentsettings = settings_cache.get_all()
+	# Redundant by design: the obsolete purge below defers the legacy sort ids until the migration has
+	# recorded success, so currentsettings still holds them when the migration runs. This pre-purge
+	# snapshot is the second line of defence if that deferral is ever removed - keep both.
+	legacy_sort_settings = {k: v for k, v in currentsettings.items() if k.startswith('sort.') or k.startswith('tmdbsort.')}
 	had_existing_settings = bool(currentsettings)
+	# Only a database that answers "no rows" without erroring is a fresh install. A failure here is
+	# treated as "not fresh", which defers the sort migration to the next sync instead of cancelling
+	# it: the sentinel stays 'false' and the obsolete purge keeps holding the legacy ids back.
+	fresh_install = False
+	if not had_existing_settings:
+		try: fresh_install = settings_cache.is_empty_strict()
+		except Exception as error:
+			kodi_utils.logger('sync_settings', 'settings db not readable, deferring sort migration: %s' % error)
 	d_settings = default_settings()
 	defaultsettings_ids = _defaultsettings_ids(d_settings)
 	defaults_map = {i['setting_id']: i for i in d_settings}
 	try:
 		c_settings = currentsettings.items()
-		obsoletesettings_ids = [k for k, v in c_settings if not k in defaultsettings_ids]
+		# Keep the legacy sort ids alive until the migration below has actually recorded success,
+		# otherwise a failed run purges the only copy of the user's per-list orderings.
+		defer_legacy_sort = currentsettings.get('migration.unified_list_sort') != 'true'
+		obsoletesettings_ids = [k for k, v in c_settings
+			if not k in defaultsettings_ids and not (defer_legacy_sort and k in _LEGACY_SORT_SETTING_IDS)]
 		if obsoletesettings_ids:
 			for item in obsoletesettings_ids: settings_cache.remove_setting(item)
 			migrated = True
 			currentsettings = settings_cache.get_all()
 	except: pass
-	if currentsettings:
-		if currentsettings.get('update.username', '').replace('-', '').lower() == 'theredwizard' \
-				and currentsettings.get('update.username') != 'The-Red-Wizard':
-			settings_cache.write_db('update.username', 'The-Red-Wizard', defaults_map.get('update.username'))
-			currentsettings['update.username'] = 'The-Red-Wizard'
+	_setting_migrations = (
+		('external.cache_check', 'rd.cache_check'),
+		('external.include_uncached_torbox', 'tb.include_uncached'),
+		('external.include_uncached_offcloud', 'oc.include_uncached'),
+	)
+	for old_id, new_id in _setting_migrations:
+		if old_id not in currentsettings: continue
+		if new_id not in currentsettings:
+			value = currentsettings[old_id]
+			settings_cache.write_db(new_id, value, defaults_map.get(new_id))
+			currentsettings[new_id] = value
+			if load_properties: settings_cache.set_memory_cache(new_id, value)
+		settings_cache.remove_setting(old_id)
+		currentsettings.pop(old_id, None)
+		migrated = True
+	_alert_timing_migrations = (
+		('stinger_alert.use_chapters', 'stinger_alert.alert_timing'),
+		('autoplay_use_chapters', 'autoplay_alert_timing'),
+		('autoscrape_use_chapters', 'autoscrape_alert_timing'),
+	)
+	for old_id, new_id in _alert_timing_migrations:
+		if old_id not in currentsettings: continue
+		new_val = '1' if str(currentsettings[old_id]).lower() == 'true' else '0'
+		settings_cache.write_db(new_id, new_val, defaults_map.get(new_id))
+		currentsettings[new_id] = new_val
+		if load_properties: settings_cache.set_memory_cache(new_id, new_val)
+		settings_cache.remove_setting(old_id)
+		currentsettings.pop(old_id, None)
+		migrated = True
+	if had_existing_settings and currentsettings.get('migration.cache_check_pm_oc_tb_v129e') != 'true':
+		for cache_key in ('pm.cache_check', 'oc.cache_check', 'tb.cache_check'):
+			if currentsettings.get(cache_key) == 'true': continue
+			settings_cache.write_db(cache_key, 'true', defaults_map.get(cache_key))
+			currentsettings[cache_key] = 'true'
+			if load_properties: settings_cache.set_memory_cache(cache_key, 'true')
 			migrated = True
-			if load_properties: settings_cache.set_memory_cache('update.username', 'The-Red-Wizard')
+		settings_cache.write_db('migration.cache_check_pm_oc_tb_v129e', 'true', defaults_map.get('migration.cache_check_pm_oc_tb_v129e'))
+		currentsettings['migration.cache_check_pm_oc_tb_v129e'] = 'true'
+		if load_properties: settings_cache.set_memory_cache('migration.cache_check_pm_oc_tb_v129e', 'true')
+	if had_existing_settings and currentsettings.get('migration.ad_cache_check_removed_v173') != 'true':
+		if currentsettings.get('ad.cache_check') == 'true':
+			settings_cache.write_db('ad.cache_check', 'false', defaults_map.get('ad.cache_check'))
+			currentsettings['ad.cache_check'] = 'false'
+			if load_properties: settings_cache.set_memory_cache('ad.cache_check', 'false')
+			migrated = True
+		settings_cache.write_db('migration.ad_cache_check_removed_v173', 'true', defaults_map.get('migration.ad_cache_check_removed_v173'))
+		currentsettings['migration.ad_cache_check_removed_v173'] = 'true'
+		if load_properties: settings_cache.set_memory_cache('migration.ad_cache_check_removed_v173', 'true')
+	if currentsettings:
+		from modules.settings import migrate_simkl_context_menu_for_upgrade, migrate_mdblist_context_menu_for_upgrade, migrate_punchplay_context_menu_for_upgrade, migrate_cm_manager_order_for_upgrade, migrate_external_scraper_context_menu_for_upgrade
+		if migrate_simkl_context_menu_for_upgrade(had_existing_settings): migrated = True
+		if migrate_mdblist_context_menu_for_upgrade(had_existing_settings): migrated = True
+		if migrate_punchplay_context_menu_for_upgrade(had_existing_settings): migrated = True
+		if migrate_external_scraper_context_menu_for_upgrade(had_existing_settings): migrated = True
+		if migrate_cm_manager_order_for_upgrade(): migrated = True
+		if currentsettings.get('migration.my_content_nav_mode_v136') != 'true':
+			try:
+				from caches.navigator_cache import migrate_my_content_nav_mode
+				if migrate_my_content_nav_mode(): migrated = True
+			except: pass
+			settings_cache.write_db('migration.my_content_nav_mode_v136', 'true', defaults_map.get('migration.my_content_nav_mode_v136'))
+			currentsettings['migration.my_content_nav_mode_v136'] = 'true'
+			if load_properties: settings_cache.set_memory_cache('migration.my_content_nav_mode_v136', 'true')
+		if currentsettings.get('migration.unified_list_sort') != 'true':
+			# Only record the migration as done when it did not raise. The obsolete purge above
+			# holds back the five legacy sort ids while this sentinel is unset, so a failed run
+			# leaves both the sentinel and the source values in place and the next sync retries
+			# for real. They are purged on that following sync, once the sentinel is 'true'.
+			sort_migration_ok = True
+			try:
+				from modules.list_sort import run_sort_migration
+				def _write_sort_setting(setting_id, value):
+					settings_cache.write_db(setting_id, value, defaults_map.get(setting_id))
+					currentsettings[setting_id] = value
+					if load_properties: settings_cache.set_memory_cache(setting_id, value)
+				if run_sort_migration(legacy_sort_settings, _write_sort_setting): migrated = True
+				try:
+					# The _strict getters raise instead of returning {} on a locked database or a corrupt
+					# row. Their swallowing siblings, which the UI uses, would report "nothing stored"
+					# and let the sentinel be written over preferences that were never read.
+					from caches.trakt_cache import get_all_lists_custom_sort_strict
+					from caches.tmdb_lists import tmdb_lists_cache
+					from caches.list_sort_cache import set_override
+					from modules.list_sort import migrate_legacy_stores
+					from caches.personal_lists_cache import personal_lists_cache
+					personal_rows = personal_lists_cache.get_all_sort_orders()
+					store_overrides = migrate_legacy_stores(get_all_lists_custom_sort_strict(), personal_rows, tmdb_lists_cache.get_sort_orders_strict())
+					failed = [scope for scope, spec_string in store_overrides.items() if not set_override(scope, spec_string)]
+					if store_overrides: migrated = True
+					if failed:
+						sort_migration_ok = False
+						kodi_utils.logger('sync_settings', 'legacy sort store migration: could not persist %s' % ', '.join(sorted(failed)))
+				except Exception as e:
+					# Swallowing this would write the sentinel on a run that saved nothing, and the per-list
+					# Trakt, personal and TMDb preferences are deleted with the legacy ids on the next sync.
+					# Fold it into the outer flag instead so the sentinel stays unset and the next sync retries.
+					sort_migration_ok = False
+					kodi_utils.logger('sync_settings', 'legacy sort store migration: %s' % e)
+			except Exception as e:
+				# Deliberately catches an ImportError on modules.list_sort too: the sentinel stays false, so a
+				# genuinely broken install retries and logs on every sync rather than once. Do not narrow this.
+				sort_migration_ok = False
+				migrated = True # a partial run may already have written the mediatype defaults
+				kodi_utils.logger('sync_settings', 'unified list sort migration: %s' % e)
+			if sort_migration_ok:
+				settings_cache.write_db('migration.unified_list_sort', 'true', defaults_map.get('migration.unified_list_sort'))
+				currentsettings['migration.unified_list_sort'] = 'true'
+				if load_properties: settings_cache.set_memory_cache('migration.unified_list_sort', 'true')
 		for setting_id, value in list(currentsettings.items()):
 			if setting_id not in defaults_map: continue
 			sanitized = sanitize_setting_value(setting_id, value, defaults_map[setting_id], validate_paths=False)
@@ -319,31 +823,51 @@ def sync_settings(params={}):
 				settings_cache.set_memory_cache(setting_id, sanitized)
 	for item in d_settings:
 		setting_id = item['setting_id']
-		if setting_id in currentsettings: continue
+		if setting_id in currentsettings:
+			continue
 		setting_type = item['setting_type']
 		setting_default = item['setting_default']
+		setting_value = _new_setting_value(setting_id, setting_default, currentsettings, had_existing_settings, fresh_install)
 		if setting_type == 'action' and 'settings_options' in item:
 			if setting_id == 'aiostreams.instance':
 				try:
 					from apis.aiostreams_api import INSTANCE_LABELS
 					name_default = INSTANCE_LABELS.get(setting_default, item['settings_options'][setting_default])
-				except: name_default = item['settings_options'][setting_default]
-			else: name_default = item['settings_options'][setting_default]
-			insert_list_append(('%s_name' % setting_id, 'name', name_default, name_default))
-		insert_list_append((setting_id, setting_type, setting_default, setting_default))
+				except (ImportError, KeyError):
+					name_default = item['settings_options'][setting_default]
+				name_value = name_default
+			else:
+				name_default = item['settings_options'][setting_default]
+				name_value = item['settings_options'].get(setting_value, name_default)
+			insert_list_append(('%s_name' % setting_id, 'name', name_default, name_value))
+		insert_list_append((setting_id, setting_type, setting_default, setting_value))
 	if insert_list:
 		settings_cache.set_many(insert_list, load_properties=load_properties)
 		migrated = True
+		if _new_settings_affect_widgets(insert_list):
+			widgets_migrated = True
+	if had_existing_settings:
+		from modules.settings import migrate_external_scraper_slots_for_upgrade, migrate_external_scraper_run_mode_for_upgrade
+		if migrate_external_scraper_slots_for_upgrade(had_existing_settings): migrated = True
+		if migrate_external_scraper_run_mode_for_upgrade(had_existing_settings): migrated = True
 	if migrated and had_existing_settings:
 		kodi_utils.set_property(_SETTINGS_DB_MIGRATED, 'true')
+	if widgets_migrated and had_existing_settings:
+		kodi_utils.set_property(_SETTINGS_WIDGETS_MIGRATED, 'true')
 	if load_properties:
 		settings_cache.clean_database()
 		bootstrap_settings_properties(force=True)
 		run_deferred_setup_if_needed()
+		kodi_utils.set_property(_SETTINGS_DB_SYNCED, 'true')
+		mark_settings_sync_complete()
 	else:
 		kodi_utils.set_property(_SETTINGS_DB_SYNCED, 'true')
-		kodi_utils.clear_property(_SETTINGS_PROPERTIES_LOADED)
+		mark_settings_sync_complete()
+		settings_cache.clear_db_cache()
+		if _properties_loaded():
+			_apply_settings_properties_from_db()
 	if not silent: kodi_utils.notification('Settings Cache Remade')
+	return 'synced'
 
 def set_default(setting_ids):
 	if not isinstance(setting_ids, list): setting_ids = [setting_ids]
@@ -356,14 +880,36 @@ def set_boolean(params):
 	boolean_dict = {'true': 'false', 'false': 'true'}
 	setting = params['setting_id']
 	set_setting(setting, boolean_dict[get_setting('mando.%s' % setting)])
+	if setting.startswith('external_scraper.slot') and setting.endswith('.enabled'):
+		try:
+			from modules.settings import refresh_external_scraper_properties
+			refresh_external_scraper_properties()
+		except: pass
 
 def set_string(params):
-	current_value = get_setting('mando.%s' % params['setting_id'])
+	setting_id = params['setting_id']
+	current_value = get_setting('mando.%s' % setting_id)
 	current_value = current_value.replace('empty_setting', '')
 	new_value = kodi_utils.kodi_dialog().input('', defaultt=current_value)
 	if not new_value and not kodi_utils.confirm_dialog(text='Enter Blank Value?', ok_label='Yes', cancel_label='Re-Enter Value', default_control=11):
 		return set_string(params)
-	set_setting(params['setting_id'], new_value or 'empty_setting')
+	if setting_id in _CREDENTIAL_STRING_SETTINGS:
+		new_value = normalize_credential_string(new_value)
+	if setting_id == 'tmdb_api' and new_value and looks_like_tmdb_v4_jwt(new_value):
+		kodi_utils.ok_dialog(heading='Wrong key type', text='This is a TMDb v4 Read Access Token (JWT), not the v3 API Key.[CR]Use TMDb Lists → Read Access Token for v4 tokens.')
+		return set_string(params)
+	if setting_id == 'playback.submaker_manifest' and new_value:
+		new_value = new_value.strip()
+	set_setting(setting_id, new_value or 'empty_setting')
+	if setting_id in ('aiostreams.username', 'aiostreams.password', 'aiostreams.custom_url'):
+		try:
+			from apis.aiostreams_api import persist_active_profile
+			persist_active_profile()
+		except: pass
+	if setting_id in ('playback.submaker_manifest', 'playback.opensubs_username', 'playback.opensubs_password'):
+		try:
+			refresh_settings_manager_properties()
+		except: pass
 
 def set_numeric(params):
 	setting_id = params['setting_id']
@@ -388,17 +934,117 @@ def set_numeric(params):
 def set_path(params):
 	setting_id = params['setting_id']
 	browse_mode = int(default_setting_values(setting_id)['browse_mode'])
-	new_value = kodi_utils.kodi_dialog().browse(browse_mode, '', '', defaultt=get_setting('mando.%s' % setting_id))
+	current = get_setting('mando.%s' % setting_id)
+	if browse_mode == 0:
+		force_defaultt = setting_id == 'import_export_directory'
+		new_value = kodi_utils.browse_directory(current, heading='Choose folder', use_defaultt=True, force_defaultt=force_defaultt)
+	else:
+		result = kodi_utils.kodi_dialog().browse(browse_mode, 'Choose file', '', defaultt=current or None)
+		new_value = result if result and str(result).strip() else None
+	if not new_value:
+		return
 	set_setting(setting_id, new_value)
+	if setting_id == 'import_export_directory':
+		try:
+			from modules import settings
+			settings.ensure_import_export_directory()
+		except:
+			pass
 
 def set_from_list(params):
 	setting_id = params['setting_id']
-	settings_options = default_setting_values(setting_id)['settings_options'].items()
-	settings_list = [(v, k) for k, v in settings_options]
+	if setting_id == 'aiostreams.instance':
+		from apis.aiostreams_api import instance_picker_list
+		settings_list = instance_picker_list()
+	elif setting_id == 'watched_indicators':
+		from modules.settings import watched_provider_options
+		settings_options = watched_provider_options().items()
+		settings_list = [(v, k) for k, v in settings_options]
+		settings_list.sort(key=lambda item: item[0].lower())
+	elif setting_id == 'recommend_service':
+		from modules.settings import recommend_service_options
+		settings_options = recommend_service_options().items()
+		settings_list = [(v, k) for k, v in settings_options]
+		settings_list.sort(key=lambda item: item[0].lower())
+	elif setting_id == 'playback.subs_source':
+		from modules.settings import subtitles_source_options
+		settings_options = subtitles_source_options().items()
+		settings_list = [(v, k) for k, v in settings_options]
+	elif setting_id in ('stinger_alert.alert_timing', 'autoplay_alert_timing', 'autoscrape_alert_timing'):
+		from modules.settings import alert_timing_options
+		settings_options = alert_timing_options(next_episode=(setting_id != 'stinger_alert.alert_timing')).items()
+		settings_list = [(v, k) for k, v in settings_options]
+		settings_list.sort(key=lambda item: item[0].lower())
+	else:
+		settings_options = default_setting_values(setting_id)['settings_options'].items()
+		settings_list = [(v, k) for k, v in settings_options]
+		if setting_id == 'external_scraper.run_mode':
+			_mode_order = ('1', '2', '3', '0')
+			settings_list.sort(key=lambda item: _mode_order.index(item[1]) if item[1] in _mode_order else 99)
 	new_value = kodi_utils.select_dialog(settings_list, **{'items': json.dumps([{'line1': item[0]} for item in settings_list]), 'narrow_window': 'true'})
 	if not new_value: return
 	setting_value = new_value[1]
+	if setting_id == 'external_scraper.run_mode' and setting_value != '1':
+		mode_opts = dict(default_setting_values(setting_id)['settings_options'])
+		mode_label = mode_opts.get(setting_value, '')
+		current = str(get_setting('mando.external_scraper.run_mode', '1'))
+		warning_text = (
+			'Many indexers are volunteer-run community resources. '
+			'[B]%s[/B] can query the same indexers multiple times. [B]Series (Fallback by Slot Order)[/B] is the recommended default.[CR][CR]'
+			'Please scrape responsibly.' % mode_label
+		)
+		if current == '1':
+			confirmed = kodi_utils.confirm_dialog(
+				heading='Search Mode',
+				text=warning_text,
+				ok_label='Continue',
+				cancel_label='Cancel',
+				default_control=11,
+			)
+			if confirmed is None or not confirmed:
+				return
+		else:
+			confirmed = kodi_utils.confirm_dialog(
+				heading='Search Mode',
+				text=warning_text,
+				ok_label='Series (Fallback)',
+				cancel_label='Continue',
+				default_control=10,
+			)
+			if confirmed is None:
+				return
+			if confirmed:
+				set_setting('external_scraper.run_mode', '1')
+				try:
+					settings_cache.set_memory_cache('external_scraper.run_mode', '1')
+					settings_cache.set_memory_cache('external_scraper.run_mode_name', mode_opts.get('1', ''))
+				except:
+					pass
+				return
+	prev_value = get_setting('mando.%s' % setting_id) if setting_id == 'watched_indicators' else None
 	set_setting(setting_id, setting_value)
+	if setting_id == 'external_scraper.run_mode':
+		try:
+			mode_opts = dict(default_setting_values(setting_id)['settings_options'])
+			settings_cache.set_memory_cache(setting_id, str(setting_value))
+			settings_cache.set_memory_cache('%s_name' % setting_id, mode_opts.get(str(setting_value), ''))
+		except:
+			pass
+	if setting_id == 'watched_indicators' and setting_value == '3' and str(prev_value) != '3':
+		try:
+			from apis.mdblist_api import mdblist_sync_activities
+			mdblist_sync_activities(force_update=True)
+		except: pass
+	if setting_id == 'watched_indicators' and setting_value == '2' and str(prev_value) != '2':
+		try:
+			from apis.simkl_api import simkl_sync_activities
+			simkl_sync_activities(force_update=True)
+		except: pass
+	if setting_id == 'watched_indicators' and setting_value == '4' and str(prev_value) != '4':
+		try:
+			from apis.punchplay_api import punchplay_sync_activities
+			punchplay_sync_activities(force_update=True)
+		except: pass
 
 def set_source_folder_path(params):
 	setting_id = params['setting_id']
@@ -439,17 +1085,51 @@ def default_settings():
 {'setting_id': 'addon_icon_choice', 'setting_type': 'string', 'setting_default': 'resources/media/addon_icons/icon.png'},
 {'setting_id': 'default_addon_fanart', 'setting_type': 'path', 'setting_default': kodi_utils.addon_fanart(), 'browse_mode': '2'},
 {'setting_id': 'limit_concurrent_threads', 'setting_type': 'boolean', 'setting_default': 'false'},
-{'setting_id': 'max_threads', 'setting_type': 'action', 'setting_default': '60', 'min_value': '10', 'max_value': '250'},
+{'setting_id': 'max_threads', 'setting_type': 'action', 'setting_default': '20', 'min_value': '10', 'max_value': '250'},
 #==================== Window Theme
 {'setting_id': 'window_theme', 'setting_type': 'string', 'setting_default': 'CC1F2020'},
 {'setting_id': 'window_theme_opacity', 'setting_type': 'string', 'setting_default': 'CC'},
-#==================== Manage Updates
+#====================Manage Updates
 {'setting_id': 'update.action', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Prompt', '1': 'Automatic', '2': 'Notification', '3': 'Off'}},
 {'setting_id': 'update.delay', 'setting_type': 'action', 'setting_default': '10', 'min_value': '10', 'max_value': '300'},
-{'setting_id': 'update.username', 'setting_type': 'string', 'setting_default': 'The-Red-Wizard'},
-{'setting_id': 'update.location', 'setting_type': 'string', 'setting_default': 'TheRedWizard.github.io'},
+{'setting_id': 'update.username', 'setting_type': 'string', 'setting_default': 'hyperionwiz/omega'},
+{'setting_id': 'update.location', 'setting_type': 'string', 'setting_default': 'hyperionwiz/omega.github.io'},
+
 #==================== Watched Indicators
-{'setting_id': 'watched_indicators', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Mando', '1': 'Trakt'}},
+{'setting_id': 'watched_indicators', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'3': 'MDBList', '4': 'PunchPlay', '0': 'Mando', '2': 'Simkl', '1': 'Trakt'}},
+#======+============= MDBList Cache
+{'setting_id': 'mdblist.user', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'mdblist.client', 'setting_type': 'string', 'setting_default': 'JFZCpEIYFtpvGk47pEEprjEkXzlPL8hJR45jqddJ'},
+{'setting_id': 'mdblist.token', 'setting_type': 'string', 'setting_default': '0'},
+{'setting_id': 'mdblist.refresh', 'setting_type': 'string', 'setting_default': '0'},
+{'setting_id': 'mdblist.sync_interval', 'setting_type': 'action', 'setting_default': '60', 'min_value': '5', 'max_value': '600'},
+{'setting_id': 'mdblist.refresh_widgets', 'setting_type': 'boolean', 'setting_default': 'true'},
+#======+============= PunchPlay Cache
+{'setting_id': 'punchplay.user', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'punchplay.client', 'setting_type': 'string', 'setting_default': 'ppc_20f43c36d33f17d01241ed83'},
+{'setting_id': 'punchplay.token', 'setting_type': 'string', 'setting_default': '0'},
+{'setting_id': 'punchplay.refresh', 'setting_type': 'string', 'setting_default': '0'},
+{'setting_id': 'punchplay.expires', 'setting_type': 'string', 'setting_default': '0'},
+{'setting_id': 'punchplay.device_id', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'punchplay.sync_interval', 'setting_type': 'action', 'setting_default': '60', 'min_value': '5', 'max_value': '600'},
+{'setting_id': 'punchplay.refresh_widgets', 'setting_type': 'boolean', 'setting_default': 'true'},
+#======+============= Simkl Cache
+{'setting_id': 'simkl.user', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'simkl.token', 'setting_type': 'string', 'setting_default': '0'},
+{'setting_id': 'simkl.sync_interval', 'setting_type': 'action', 'setting_default': '60', 'min_value': '5', 'max_value': '600'},
+{'setting_id': 'simkl.refresh_widgets', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'simkl.cm_menu_migrated', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'mdblist.cm_menu_migrated', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'punchplay.cm_menu_migrated', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'external_scraper.cm_menu_migrated', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'cm_manager_order_migrated', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'cm_manager_order_migrated_v2', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'cm_manager_order_migrated_v3', 'setting_type': 'boolean', 'setting_default': 'false'},
+#======+============= WeTrakr (scrobble only)
+{'setting_id': 'wetrakr.user', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'wetrakr.token', 'setting_type': 'string', 'setting_default': '0'},
+{'setting_id': 'wetrakr.scrobble', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'wetrakr.scrobble_threshold', 'setting_type': 'action', 'setting_default': '90', 'min_value': '50', 'max_value': '99'},
 #======+============= Trakt Cache
 {'setting_id': 'trakt.sync_interval', 'setting_type': 'action', 'setting_default': '60', 'min_value': '5', 'max_value': '600'},
 {'setting_id': 'trakt.refresh_widgets', 'setting_type': 'boolean', 'setting_default': 'true'},
@@ -460,6 +1140,7 @@ def default_settings():
 {'setting_id': 'tvshow_download_directory', 'setting_type': 'path', 'setting_default': 'special://profile/addon_data/plugin.video.mando/TV Show Downloads/', 'browse_mode': '0'},
 {'setting_id': 'premium_download_directory', 'setting_type': 'path', 'setting_default': 'special://profile/addon_data/plugin.video.mando/Premium Downloads/', 'browse_mode': '0'},
 {'setting_id': 'image_download_directory', 'setting_type': 'path', 'setting_default': 'special://profile/addon_data/plugin.video.mando/Image Downloads/', 'browse_mode': '0'},
+{'setting_id': 'import_export_directory', 'setting_type': 'path', 'setting_default': 'special://profile/addon_data/plugin.video.mando/Import Export/', 'browse_mode': '0'},
 
 
 #================================================================================#
@@ -473,8 +1154,10 @@ def default_settings():
 #==================== Special Open Actions
 {'setting_id': 'media_open_action_movie', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'None', '1': 'Open Extras', '2': 'Open Movie Set', '3': 'Both'}},
 {'setting_id': 'media_open_action_tvshow', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'None', '1': 'Open Extras'}},
+{'setting_id': 'media_open_action_skip_inprogress_movie', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'media_open_action_skip_inprogress_tvshow', 'setting_type': 'boolean', 'setting_default': 'false'},
 #==================== AI Generated Similar Titles
-{'setting_id': 'ai_model.order', 'setting_type': 'string', 'setting_default': 'gemini-2.5-flash-lite,llama-3.3-70b-versatile,gemma-3-27b-it,llama-3.1-8b-instant'},
+{'setting_id': 'ai_model.order', 'setting_type': 'string', 'setting_default': 'gemini-3.1-flash-lite,llama-3.3-70b-versatile,gemma-4-31b-it,llama-3.1-8b-instant'},
 {'setting_id': 'ai_model.limit', 'setting_type': 'action', 'setting_default': '15', 'min_value': '1', 'max_value': '25'},
 
 
@@ -496,10 +1179,12 @@ def default_settings():
 {'setting_id': 'lists_cache_duraton', 'setting_type': 'string', 'setting_default': '24'},
 {'setting_id': 'tv_progress_location', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Watched', '1': 'In Progress', '2': 'Both'}},
 {'setting_id': 'show_specials', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'exclude_specials_progress', 'setting_type': 'boolean', 'setting_default': 'true'},
 {'setting_id': 'use_season_name', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'default_all_episodes', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Never', '1': 'If Only One Season', '2': 'Always'}},
 {'setting_id': 'avoid_episode_spoilers', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'include_anime_tvshow', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'anime.seasons_episode_group_fallback', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'show_unaired_watchlist', 'setting_type': 'boolean', 'setting_default': 'true'},
 {'setting_id': 'meta_filter', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'use_viewtypes', 'setting_type': 'boolean', 'setting_default': 'true'},
@@ -514,14 +1199,11 @@ def default_settings():
 #==================== Contents Sort Order For Watched Progress
 {'setting_id': 'sort.progress', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Title', '1': 'Recently Watched'}},
 {'setting_id': 'sort.watched', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Title', '1': 'Recently Watched'}},
-#==================== Contents Sort Order For Trakt Lists
-{'setting_id': 'sort.collection', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Title', '1': 'Date Added', '2': 'Release Date'}},
-{'setting_id': 'sort.watchlist', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Title', '1': 'Date Added', '2': 'Release Date'}},
-#==================== Contents Sort Order For TMDb Lists
-{'setting_id': 'tmdbsort.watchlist', 'setting_type': 'action', 'setting_default': '4', 'settings_options': {'0': 'Title', '1': 'Release Date (asc)', '2': 'Release Date (desc)',
-'3': 'Shuffle', '4': 'Default from TMDb (None)'}},
-{'setting_id': 'tmdbsort.favorites', 'setting_type': 'action', 'setting_default': '4', 'settings_options': {'0': 'Title', '1': 'Release Date (asc)', '2': 'Release Date (desc)',
-'3': 'Shuffle', '4': 'Default from TMDb (None)'}},
+#==================== Contents Sort Order Defaults (per media type, all lists)
+{'setting_id': 'sort.default.movies', 'setting_type': 'string', 'setting_default': 'title:asc'},
+{'setting_id': 'sort.default.movies_name', 'setting_type': 'name', 'setting_default': 'Title (ascending)'},
+{'setting_id': 'sort.default.shows', 'setting_type': 'string', 'setting_default': 'title:asc'},
+{'setting_id': 'sort.default.shows_name', 'setting_type': 'name', 'setting_default': 'Title (ascending)'},
 #==================== Personal Lists
 {'setting_id': 'personal_list.sort_unseen_to_top', 'setting_type': 'boolean', 'setting_default': 'true'},
 {'setting_id': 'personal_list.highlight_unseen', 'setting_type': 'boolean', 'setting_default': 'false'},
@@ -537,19 +1219,19 @@ def default_settings():
 {'setting_id': 'rpdb_format', 'setting_type': 'string', 'setting_default': ''},
 #==================== Context Menu
 {'setting_id': 'context_menu.enabled', 'setting_type': 'string',
-'setting_default': 'extras,options,playback_options,browse_movie_set,browse_seasons,browse_episodes,recommended,related,more_like_this,similar,in_trakt_list,' \
-'trakt_manager,personal_manager,tmdb_manager,favorites_manager,mark_watched,unmark_previous_episode,exit,refresh,reload'},
+'setting_default': 'extras,options,playback_options,external_scraper_settings,browse_movie_set,browse_seasons,browse_episodes,recommended,related,more_like_this,similar,in_trakt_list,' \
+'mdblist_manager,punchplay_manager,simkl_manager,tmdb_manager,trakt_manager,personal_manager,favorites_manager,mark_watched,unmark_previous_episode,exit,refresh,reload'},
 {'setting_id': 'context_menu.order', 'setting_type': 'string',
-'setting_default': 'extras,options,playback_options,browse_movie_set,browse_seasons,browse_episodes,recommended,related,more_like_this,similar,in_trakt_list,' \
-'trakt_manager,personal_manager,tmdb_manager,favorites_manager,mark_watched,unmark_previous_episode,exit,refresh,reload'},
+'setting_default': 'extras,options,playback_options,external_scraper_settings,browse_movie_set,browse_seasons,browse_episodes,recommended,related,more_like_this,similar,in_trakt_list,' \
+'mdblist_manager,punchplay_manager,simkl_manager,tmdb_manager,trakt_manager,personal_manager,favorites_manager,mark_watched,unmark_previous_episode,exit,refresh,reload'},
 
 
 #==================================================================================#
 #====================================SINGLE EPISODE LISTS==========================#
 #==================================================================================#
 #==================== General
-{'setting_id': 'single_ep_display', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'TITLE: SxE - EPISODE', '1': 'SxE - EPISODE', '2': 'EPISODE'}},
-{'setting_id': 'single_ep_display_widget', 'setting_type': 'action', 'setting_default': '1', 'settings_options': {'0': 'TITLE: SxE - EPISODE', '1': 'SxE - EPISODE', '2': 'EPISODE'}},
+{'setting_id': 'single_ep_display', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'TITLE - SxE. EPISODE', '1': 'SxE. EPISODE', '2': 'EPISODE'}},
+{'setting_id': 'single_ep_display_widget', 'setting_type': 'action', 'setting_default': '1', 'settings_options': {'0': 'TITLE - SxE. EPISODE', '1': 'SxE. EPISODE', '2': 'EPISODE'}},
 {'setting_id': 'single_ep_unwatched_episodes', 'setting_type': 'boolean', 'setting_default': 'false'},
 #==================== Next Episodes
 {'setting_id': 'nextep.method', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Last Aired', '1': 'Last Watched'}},
@@ -561,9 +1243,15 @@ def default_settings():
 {'setting_id': 'nextep.include_airdate', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'nextep.airing_today', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'nextep.include_unaired', 'setting_type': 'boolean', 'setting_default': 'false'},
-#======+============= Trakt Calendar
+#======+============= Calendars (Trakt + MDBList + PunchPlay — shared episode-list UI)
 {'setting_id': 'trakt.flatten_episodes', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'trakt.calendar_display', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'TITLE - SxE. EPISODE', '1': 'SxE. EPISODE', '2': 'EPISODE'}},
+{'setting_id': 'trakt.calendar_display_widget', 'setting_type': 'action', 'setting_default': '1', 'settings_options': {'0': 'TITLE - SxE. EPISODE', '1': 'SxE. EPISODE', '2': 'EPISODE'}},
 {'setting_id': 'trakt.calendar_sort_order', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Descending', '1': 'Ascending'}},
+{'setting_id': 'trakt.calendar_date_labels', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {
+	'0': 'Words / YYYY-MM-DD', '7': 'Words / MM-DD-YYYY', '8': 'Words / DD-MM-YYYY',
+	'3': 'YYYY-MM-DD', '1': 'MM-DD-YYYY', '2': 'DD-MM-YYYY',
+	'6': 'Day + YYYY-MM-DD', '4': 'Day + MM-DD-YYYY', '5': 'Day + DD-MM-YYYY'}},
 {'setting_id': 'trakt.calendar_previous_days', 'setting_type': 'action', 'setting_default': '7', 'min_value': '0', 'max_value': '14'},
 {'setting_id': 'trakt.calendar_future_days', 'setting_type': 'action', 'setting_default': '7', 'min_value': '0', 'max_value': '14'},
 
@@ -598,11 +1286,25 @@ def default_settings():
 #==================== External
 {'setting_id': 'provider.external', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'external_scraper.name', 'setting_type': 'string', 'setting_default': 'empty_setting'},
-{'setting_id': 'external.cache_check', 'setting_type': 'boolean', 'setting_default': 'false'},
-{'setting_id': 'external.include_uncached_torbox', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'external_scraper.slot1.module', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'external_scraper.slot1.name', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'external_scraper.slot1.enabled', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'external_scraper.slot2.module', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'external_scraper.slot2.name', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'external_scraper.slot2.enabled', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'external_scraper.slot3.module', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'external_scraper.slot3.name', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'external_scraper.slot3.enabled', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'external_scraper.run_mode', 'setting_type': 'action', 'setting_default': '1', 'settings_options': {'1': 'Series (Fallback by Slot Order)', '2': 'Series (All Slots in Order)', '3': 'Primary Slot + Parallel Fallback', '0': 'Parallel (All Enabled Slots)'}},
+{'setting_id': 'migration.external_scraper_slots_v160', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'migration.cache_check_pm_oc_tb_v129e', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'migration.ad_cache_check_removed_v173', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'migration.my_content_nav_mode_v136', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'migration.unified_list_sort', 'setting_type': 'boolean', 'setting_default': 'false'},
 #==================== Real Debrid
 {'setting_id': 'rd.token', 'setting_type': 'string', 'setting_default': 'empty_setting'},
 {'setting_id': 'rd.enabled', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'rd.cache_check', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'rd.account_id', 'setting_type': 'string', 'setting_default': 'empty_setting'},
 {'setting_id': 'store_resolved_to_cloud.real-debrid', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'None', '1': 'All', '2': 'Show Packs Only'}},
 {'setting_id': 'provider.rd_cloud', 'setting_type': 'boolean', 'setting_default': 'false'},
@@ -616,6 +1318,8 @@ def default_settings():
 #==================== Premiumize
 {'setting_id': 'pm.token', 'setting_type': 'string', 'setting_default': 'empty_setting'},
 {'setting_id': 'pm.enabled', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'pm.cache_check', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'pm.include_uncached', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'pm.account_id', 'setting_type': 'string', 'setting_default': 'empty_setting'},
 {'setting_id': 'store_resolved_to_cloud.premiumize.me', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'None', '1': 'All', '2': 'Show Packs Only'}},
 {'setting_id': 'provider.pm_cloud', 'setting_type': 'boolean', 'setting_default': 'false'},
@@ -627,6 +1331,7 @@ def default_settings():
 #==================== All Debrid
 {'setting_id': 'ad.token', 'setting_type': 'string', 'setting_default': 'empty_setting'},
 {'setting_id': 'ad.enabled', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'ad.cache_check', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'ad.account_id', 'setting_type': 'string', 'setting_default': 'empty_setting'},
 {'setting_id': 'store_resolved_to_cloud.alldebrid', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'None', '1': 'All', '2': 'Show Packs Only'}},
 {'setting_id': 'provider.ad_cloud', 'setting_type': 'boolean', 'setting_default': 'false'},
@@ -635,9 +1340,25 @@ def default_settings():
 {'setting_id': 'autoplay.ad_cloud', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'results.sort_adcloud_first', 'setting_type': 'boolean', 'setting_default': 'true'},
 {'setting_id': 'ad.priority', 'setting_type': 'action', 'setting_default': '10', 'min_value': '1', 'max_value': '10'},
+#==================== Offcloud
+{'setting_id': 'oc.token', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'oc.account_id', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'oc.enabled', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'oc.cache_check', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'oc.include_uncached', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'store_resolved_to_cloud.offcloud', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'None', '1': 'All', '2': 'Show Packs Only'}},
+{'setting_id': 'oc.notify_cloud_ready', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'provider.oc_cloud', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'oc_cloud.title_filter', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'check.oc_cloud', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'autoplay.oc_cloud', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'results.sort_occloud_first', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'oc.priority', 'setting_type': 'action', 'setting_default': '10', 'min_value': '1', 'max_value': '10'},
 #==================== TorBox
 {'setting_id': 'tb.token', 'setting_type': 'string', 'setting_default': 'empty_setting'},
 {'setting_id': 'tb.enabled', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'tb.cache_check', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'tb.include_uncached', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'store_resolved_to_cloud.torbox', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'None', '1': 'All', '2': 'Show Packs Only'}},
 {'setting_id': 'tb.notify_cloud_ready', 'setting_type': 'boolean', 'setting_default': 'true'},
 {'setting_id': 'provider.tb_cloud', 'setting_type': 'boolean', 'setting_default': 'false'},
@@ -648,6 +1369,14 @@ def default_settings():
 {'setting_id': 'tb.priority', 'setting_type': 'action', 'setting_default': '10', 'min_value': '1', 'max_value': '10'},
 #==================== EasyNews
 {'setting_id': 'provider.easynews', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'services.expiry_alert_days', 'setting_type': 'action', 'setting_default': '7', 'min_value': '0', 'max_value': '90'},
+{'setting_id': 'services.expiry_alert_state', 'setting_type': 'string', 'setting_default': '{}'},
+{'setting_id': 'services.expiry_alert.ad', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'services.expiry_alert.easynews', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'services.expiry_alert.oc', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'services.expiry_alert.pm', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'services.expiry_alert.rd', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'services.expiry_alert.tb', 'setting_type': 'boolean', 'setting_default': 'true'},
 {'setting_id': 'easynews_user', 'setting_type': 'string', 'setting_default': 'empty_setting'},
 {'setting_id': 'easynews_password', 'setting_type': 'string', 'setting_default': 'empty_setting'},
 {'setting_id': 'easynews.title_filter', 'setting_type': 'boolean', 'setting_default': 'true'},
@@ -665,16 +1394,18 @@ def default_settings():
 {'setting_id': 'provider.aiostreams', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'aiostreams.instance', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {
 	'0': 'Kuu — https://aiostreams.stremio.ru',
-	'1': 'ElfHosted — https://aiostreams.elfhosted.com',
+	'1': 'Viren — https://aiostreams.viren070.me',
 	'2': 'Yeb — https://aiostreams.fortheweak.cloud',
 	'3': 'Midnight — https://aiostreamsfortheweebsstable.midnightignite.me',
 	'4': 'Custom — set URL below',
+	# '5' ElfHosted — hidden from picker (Search API disabled on public host); keep id reserved.
 }},
-{'setting_id': 'aiostreams.instance_schema', 'setting_type': 'string', 'setting_default': '2'},
+{'setting_id': 'aiostreams.profiles', 'setting_type': 'string', 'setting_default': '{}'},
 {'setting_id': 'aiostreams.custom_url', 'setting_type': 'string', 'setting_default': ''},
 {'setting_id': 'aiostreams.username', 'setting_type': 'string', 'setting_default': 'empty_setting'},
 {'setting_id': 'aiostreams.password', 'setting_type': 'string', 'setting_default': 'empty_setting'},
 {'setting_id': 'aiostreams.title_filter', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'aiostreams.preserve_order', 'setting_type': 'boolean', 'setting_default': 'true'},
 {'setting_id': 'check.aiostreams', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'autoplay.aiostreams', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'aio.priority', 'setting_type': 'action', 'setting_default': '7', 'min_value': '1', 'max_value': '10'},
@@ -687,6 +1418,27 @@ def default_settings():
 {'setting_id': 'results.sort_folders_first', 'setting_type': 'boolean', 'setting_default': 'true'},
 {'setting_id': 'results.folders_ignore_filters', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'folders.priority', 'setting_type': 'action', 'setting_default': '6', 'min_value': '1', 'max_value': '10'},
+#==================== NZB Indexers
+{'setting_id': 'provider.nzb', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'nzb1.enabled', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'nzb1.label', 'setting_type': 'string', 'setting_default': 'NZB Indexer 1'},
+{'setting_id': 'nzb1.url', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'nzb1.key', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'nzb2.enabled', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'nzb2.label', 'setting_type': 'string', 'setting_default': 'NZB Indexer 2'},
+{'setting_id': 'nzb2.url', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'nzb2.key', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'nzb3.enabled', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'nzb3.label', 'setting_type': 'string', 'setting_default': 'NZB Indexer 3'},
+{'setting_id': 'nzb3.url', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'nzb3.key', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'nzb.title_filter', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'nzb.fallback_search', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'nzb.search_width', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Focused', '1': 'Balanced', '2': 'Broad'}},
+{'setting_id': 'check.nzb', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'autoplay.nzb', 'setting_type': 'boolean', 'setting_default': 'false'},
+{'setting_id': 'nzb.priority', 'setting_type': 'action', 'setting_default': '7', 'min_value': '1', 'max_value': '10'},
+{'setting_id': 'provider.nzb_highlight', 'setting_type': 'string', 'setting_default': 'FFD4A017'},
 
 
 #===============================================================================#
@@ -743,12 +1495,18 @@ def default_settings():
 {'setting_id': 'provider.rd_highlight', 'setting_type': 'string', 'setting_default': 'FF3C9900'},
 {'setting_id': 'provider.pm_highlight', 'setting_type': 'string', 'setting_default': 'FFFF3300'},
 {'setting_id': 'provider.ad_highlight', 'setting_type': 'string', 'setting_default': 'FFE6B800'},
+{'setting_id': 'provider.oc_highlight', 'setting_type': 'string', 'setting_default': 'FF5C6BC0'},
 {'setting_id': 'provider.tb_highlight', 'setting_type': 'string', 'setting_default': 'FF01662A'},
 {'setting_id': 'scraper_4k_highlight', 'setting_type': 'string', 'setting_default': 'FFFF00FE'},
 {'setting_id': 'scraper_1080p_highlight', 'setting_type': 'string', 'setting_default': 'FFE6B800'},
 {'setting_id': 'scraper_720p_highlight', 'setting_type': 'string', 'setting_default': 'FF3C9900'},
 {'setting_id': 'scraper_SD_highlight', 'setting_type': 'string', 'setting_default': 'FF0166FF'},
 {'setting_id': 'scraper_single_highlight', 'setting_type': 'string', 'setting_default': 'FF008EB2'},
+{'setting_id': 'scraper_total_highlight', 'setting_type': 'string', 'setting_default': 'FFFFFFFF'},
+{'setting_id': 'highlight.scrape_progress_colours', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'highlight.tint_focused_background', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'highlight.background_opacity', 'setting_type': 'string', 'setting_default': '66'},
+{'setting_id': 'highlight.background_opacity_name', 'setting_type': 'string', 'setting_default': '40%'},
 
 
 #===============================================================================#
@@ -758,23 +1516,27 @@ def default_settings():
 {'setting_id': 'auto_play_movie', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'results_quality_movie', 'setting_type': 'string', 'setting_default': 'SD, 720p, 1080p, 4K'},
 {'setting_id': 'autoplay_quality_movie', 'setting_type': 'string', 'setting_default': 'SD, 720p, 1080p, 4K'},
+{'setting_id': 'autoplay.movie_size_max', 'setting_type': 'action', 'setting_default': '0', 'min_value': '0'},
 {'setting_id': 'auto_resume_movie', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Never', '1': 'Always', '2': 'Autoplay Only'}},
 {'setting_id': 'stinger_alert.show', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'stinger_alert.window_percentage', 'setting_type': 'action', 'setting_default': '90', 'min_value': '1', 'max_value': '99'},
-{'setting_id': 'stinger_alert.use_chapters', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'stinger_alert.alert_timing', 'setting_type': 'action', 'setting_default': '1', 'settings_options': {'0': 'Playback Percentage', '1': 'Chapter Info', '2': 'Subtitles Info'}},
 #==================== Playback Episodes
 {'setting_id': 'auto_play_episode', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'results_quality_episode', 'setting_type': 'string', 'setting_default': 'SD, 720p, 1080p, 4K'},
 {'setting_id': 'autoplay_quality_episode', 'setting_type': 'string', 'setting_default': 'SD, 720p, 1080p, 4K'},
+{'setting_id': 'autoplay.episode_size_max', 'setting_type': 'action', 'setting_default': '0', 'min_value': '0'},
 {'setting_id': 'autoplay_next_episode', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'autoplay_alert_method', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Window', '1': 'Notification'}},
 {'setting_id': 'autoplay_default_action', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Play', '1': 'Cancel', '2': 'Pause & Wait'}},
 {'setting_id': 'autoplay_next_window_percentage', 'setting_type': 'action', 'setting_default': '95', 'min_value': '75', 'max_value': '99'},
-{'setting_id': 'autoplay_use_chapters', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'autoplay_alert_timing', 'setting_type': 'action', 'setting_default': '1', 'settings_options': {'0': 'Playback Percentage', '1': 'Chapter Info', '2': 'Subtitles Info', '3': 'IntroDB Info'}},
+{'setting_id': 'autoplay_skip_intro', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Off', '2': 'Auto', '1': 'Prompt'}},
+{'setting_id': 'skip_intro_all_episodes', 'setting_type': 'boolean', 'setting_default': 'true'},
 {'setting_id': 'autoplay_watching_check', 'setting_type': 'action', 'setting_default': '3', 'min_value': '0', 'max_value': '5'},
 {'setting_id': 'autoscrape_next_episode', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'autoscrape_next_window_percentage', 'setting_type': 'action', 'setting_default': '95', 'min_value': '75', 'max_value': '99'},
-{'setting_id': 'autoscrape_use_chapters', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'autoscrape_alert_timing', 'setting_type': 'action', 'setting_default': '1', 'settings_options': {'0': 'Playback Percentage', '1': 'Chapter Info', '2': 'Subtitles Info', '3': 'IntroDB Info'}},
 {'setting_id': 'autoscrape_confirm', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'auto_resume_episode', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Never', '1': 'Always', '2': 'Autoplay Only'}},
 #==================== Playback Utilities
@@ -785,15 +1547,19 @@ def default_settings():
 {'setting_id': 'playback.volumecheck_enabled', 'setting_type': 'boolean', 'setting_default': 'false'},
 {'setting_id': 'playback.volumecheck_percent', 'setting_type': 'action', 'setting_default': '50', 'min_value': '1', 'max_value': '100'},
 {'setting_id': 'playback.auto_enable_subs', 'setting_type': 'boolean', 'setting_default': 'false'},
-{'setting_id': 'playback.subs_source', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Local Subtitles', '1': 'SubMaker'}},
+{'setting_id': 'playback.opensubs_api_key', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'playback.opensubs_username', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'playback.opensubs_password', 'setting_type': 'string', 'setting_default': 'empty_setting'},
+{'setting_id': 'playback.subs_source', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'Local Subtitles', '1': 'SubMaker', '2': 'OpenSubtitles'}},
 {'setting_id': 'playback.submaker_manifest', 'setting_type': 'string', 'setting_default': 'empty_setting'},
 {'setting_id': 'playback.submaker_language', 'setting_type': 'action', 'setting_default': '0', 'settings_options': {'0': 'English', '1': 'Arabic', '2': 'Bengali',
 '3': 'Bulgarian', '4': 'Chinese', '5': 'Croatian', '6': 'Czech', '7': 'Danish', '8': 'Dutch', '9': 'Finnish', '10': 'French', '11': 'German',
 '12': 'Greek', '13': 'Hebrew', '14': 'Hindi', '15': 'Hungarian', '16': 'Icelandic', '17': 'Indonesian', '18': 'Italian', '19': 'Japanese',
 '20': 'Korean', '21': 'Malay', '22': 'Norwegian', '23': 'Persian', '24': 'Polish', '25': 'Portuguese', '26': 'Portuguese (Brazil)', '27': 'Punjabi',
 '28': 'Romanian', '29': 'Russian', '30': 'Serbian', '31': 'Slovenian', '32': 'Spanish', '33': 'Swedish', '34': 'Tagalog', '35': 'Tamil', '36': 'Telugu',
-'37': 'Thai', '38': 'Turkish', '39': 'Ukrainian', '40': 'Urdu', '41': 'Vietnamese'}},
+'37': 'Thai', '38': 'Turkish', '39': 'Ukrainian', '40': 'Urdu', '41': 'Vietnamese', '42': 'Forced Only (Local Subs)'}},
 {'setting_id': 'playback.submaker_prefer_local', 'setting_type': 'boolean', 'setting_default': 'true'},
+{'setting_id': 'playback.subs_show_notifications', 'setting_type': 'boolean', 'setting_default': 'true'},
 
 
 #=========================================================================================#
@@ -818,6 +1584,7 @@ def default_settings():
 {'setting_id': 'trakt.expires', 'setting_type': 'string', 'setting_default': '0'},
 {'setting_id': 'trakt.refresh', 'setting_type': 'string', 'setting_default': '0'},
 {'setting_id': 'trakt.token', 'setting_type': 'string', 'setting_default': '0'},
+{'setting_id': 'playback.opensubs_token', 'setting_type': 'string', 'setting_default': '0'},
 {'setting_id': 'tmdblist.list_sort', 'setting_type': 'string', 'setting_default': '0'},
 {'setting_id': 'tmdblist.list_sort_name', 'setting_type': 'string', 'setting_default': 'Title'},
 {'setting_id': 'personal_list.list_sort', 'setting_type': 'string', 'setting_default': '0'},
@@ -861,6 +1628,5 @@ def default_settings():
 {'setting_id': 'extras.movie.button15', 'setting_type': 'string', 'setting_default': 'show_genres'},
 {'setting_id': 'extras.movie.button16', 'setting_type': 'string', 'setting_default': 'show_director'},
 {'setting_id': 'extras.movie.button17', 'setting_type': 'string', 'setting_default': 'show_options'},
-{'setting_id': 'updatechecks.refresh_addon_keys', 'setting_type': 'string', 'setting_default': 'false'}
 	]
 	return _DEFAULTS_LIST

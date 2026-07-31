@@ -38,50 +38,84 @@
                 <align>center</align>
                 <label>[UPPERCASE][B]$INFO[Window.Property(heading)][/B][/UPPERCASE]</label>
             </control>
-            <control type="textbox">
+            <control type="textbox" id="2000">
                 <left>40</left>
                 <top>60</top>
-                <width>720</width>
-                <height>280</height>
+                <width>690</width>
+                <height>300</height>
                 <font>font13</font> <!-- MANDO_30 -->
                 <textcolor>FFCCCCCC</textcolor>
-                <align>center</align>
-                <aligny>center</aligny>
+                <align>left</align>
+                <aligny>top</aligny>
                 <label>$INFO[Window.Property(text)]</label>
+                <pagecontrol>2070</pagecontrol>
+                <autoscroll>false</autoscroll>
             </control>
-            <control type="button" id="10">
-                <description>True</description>
-                <top>380</top>
-                <left>35</left>
-                <width>340</width>
-                <height>70</height>
-                <onleft>11</onleft>
-                <onright>11</onright>
-                <label>$INFO[Window.Property(ok_label)]</label>
-                <font>font12</font> <!-- MANDO_26 -->
-                <textcolor>FFCCCCCC</textcolor>
-                <focusedcolor>FF1F2020</focusedcolor>
-                <texturefocus colordiffuse="CCCCCCCC" border="30">mando_common/circle.png</texturefocus>
-                <texturenofocus colordiffuse="$INFO[Window(10000).Property(mando.window_theme_contrast)]" border="30">mando_common/circle.png</texturenofocus>
-                <align>center</align>
-                <aligny>center</aligny>
+            <control type="scrollbar" id="2070">
+                <visible>String.IsEqual(Window.Property(scroll),true)</visible>
+                <left>735</left>
+                <top>60</top>
+                <width>10</width>
+                <height>300</height>
+                <texturesliderbackground colordiffuse="FF1F2020">mando_common/white.png</texturesliderbackground>
+                <texturesliderbar colordiffuse="FF555556">mando_common/white.png</texturesliderbar>
+                <texturesliderbarfocus colordiffuse="FFCCCCCC">mando_common/white.png</texturesliderbarfocus>
+                <onleft>2070</onleft>
+                <onright>2070</onright>
+                <ondown>3010</ondown>
+                <showonepage>false</showonepage>
+                <orientation>vertical</orientation>
             </control>
-            <control type="button" id="11">
-                <description>False</description>
+            <control type="grouplist" id="3000">
+                <left>25</left>
                 <top>380</top>
-                <left>400</left>
-                <width>340</width>
+                <width>728</width>
                 <height>70</height>
-                <onleft>10</onleft>
-                <onright>10</onright>
-                <label>$INFO[Window.Property(cancel_label)]</label>
-                <font>font12</font> <!-- MANDO_26 -->
-                <textcolor>FFCCCCCC</textcolor>
-                <focusedcolor>FF1F2020</focusedcolor>
-                <texturefocus colordiffuse="CCCCCCCC" border="30">mando_common/circle.png</texturefocus>
-                <texturenofocus colordiffuse="$INFO[Window(10000).Property(mando.window_theme_contrast)]" border="30">mando_common/circle.png</texturenofocus>
-                <align>center</align>
-                <aligny>center</aligny>
+                <orientation>horizontal</orientation>
+                <itemgap>12</itemgap>
+                <onup>2070</onup>
+                <control type="button" id="3010">
+                    <description>True</description>
+                    <width>358</width>
+                    <width condition="String.IsEqual(Window.Property(show_third_button),true)">234</width>
+                    <height>70</height>
+                    <label>$INFO[Window.Property(ok_label)]</label>
+                    <font>font12</font> <!-- MANDO_26 -->
+                    <textcolor>FFCCCCCC</textcolor>
+                    <focusedcolor>FF1F2020</focusedcolor>
+                    <texturefocus colordiffuse="CCCCCCCC" border="30">mando_common/circle.png</texturefocus>
+                    <texturenofocus colordiffuse="$INFO[Window(10000).Property(mando.window_theme_contrast)]" border="30">mando_common/circle.png</texturenofocus>
+                    <align>center</align>
+                    <aligny>center</aligny>
+                </control>
+                <control type="button" id="3011">
+                    <description>False</description>
+                    <width>358</width>
+                    <width condition="String.IsEqual(Window.Property(show_third_button),true)">234</width>
+                    <height>70</height>
+                    <label>$INFO[Window.Property(cancel_label)]</label>
+                    <font>font12</font> <!-- MANDO_26 -->
+                    <textcolor>FFCCCCCC</textcolor>
+                    <focusedcolor>FF1F2020</focusedcolor>
+                    <texturefocus colordiffuse="CCCCCCCC" border="30">mando_common/circle.png</texturefocus>
+                    <texturenofocus colordiffuse="$INFO[Window(10000).Property(mando.window_theme_contrast)]" border="30">mando_common/circle.png</texturenofocus>
+                    <align>center</align>
+                    <aligny>center</aligny>
+                </control>
+                <control type="button" id="3012">
+                    <description>Third</description>
+                    <visible>String.IsEqual(Window.Property(show_third_button),true)</visible>
+                    <width>234</width>
+                    <height>70</height>
+                    <label>$INFO[Window.Property(third_label)]</label>
+                    <font>font12</font> <!-- MANDO_26 -->
+                    <textcolor>FFCCCCCC</textcolor>
+                    <focusedcolor>FF1F2020</focusedcolor>
+                    <texturefocus colordiffuse="CCCCCCCC" border="30">mando_common/circle.png</texturefocus>
+                    <texturenofocus colordiffuse="$INFO[Window(10000).Property(mando.window_theme_contrast)]" border="30">mando_common/circle.png</texturenofocus>
+                    <align>center</align>
+                    <aligny>center</aligny>
+                </control>
             </control>
         </control>
     </controls>

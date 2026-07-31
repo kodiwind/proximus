@@ -7,11 +7,14 @@ from threading import Thread
 from urllib.request import Request, urlopen
 from urllib.parse import parse_qsl, urlparse, unquote
 from modules import kodi_utils
-from modules.sources import Sources
+from modules.sources import Sources, PROP_RESOLVE_CANCEL
 from modules.settings import download_directory, store_resolved_to_cloud
+from modules.debrid import normalize_debrid_provider
 from modules.source_utils import clean_title
 from modules.utils import clean_file_name, safe_string, remove_accents, normalize
 # logger = kodi_utils.logger
+
+NO_DOWNLOAD_URL_MSG = 'No URL found for Download. Pick another Source'
 
 def runner(params):
 	action = params.get('action')
@@ -32,7 +35,7 @@ def runner(params):
 		pack_choices, pack_api = pack_result
 		provider = downloader_provider_slug(getattr(pack_source, 'debrid', '') or source.get('cache_provider', ''))
 		pack_items = [dict(params, **{'pack_files': item, 'provider': provider}) for item in pack_choices]
-		icon = {'real-debrid': 'realdebrid', 'premiumize.me': 'premiumize', 'alldebrid': 'alldebrid', 'torbox': 'torbox'}.get(provider, 'box_office')
+		icon = {'real-debrid': 'realdebrid', 'premiumize.me': 'premiumize', 'alldebrid': 'alldebrid', 'offcloud': 'offcloud', 'torbox': 'torbox'}.get(provider, 'box_office')
 		chosen_list = select_pack_item(pack_items, kodi_utils.get_icon(icon))
 		if not chosen_list: return
 		show_package = source.get('package') == 'show'
@@ -47,7 +50,8 @@ def runner(params):
 				if season:
 					meta['season'] = season
 					item['meta'] = json.dumps(meta)
-					item['default_foldername'] = default_foldername
+			item['default_foldername'] = default_foldername
+			item['pack_batch'] = True
 			threads_append(Thread(target=Downloader(item).run))
 		kodi_utils.notification('Multi File Pack Download Started...', 3500, image)
 		for thread in threads:
@@ -100,16 +104,44 @@ def get_season(meta):
 		season = meta.get('custom_season', None) or meta.get('season')
 		return int(season) if season else None
 
+def _sanitize_path_name(name):
+	if not name:
+		return ''
+	for char in r'\/:*?"<>|':
+		name = name.replace(char, '')
+	return name.strip('. ')
+
+def _video_extension(name):
+	if not name:
+		return ''
+	ext = os.path.splitext(name)[1].lstrip('.').lower()
+	if ext in kodi_utils.video_extensions():
+		return ext
+	return ''
+
+def _release_name_from_source(source_json):
+	try:
+		source = json.loads(source_json) if isinstance(source_json, str) else (source_json or {})
+		for key in ('name', 'display_name'):
+			val = (source.get(key) or '').strip()
+			if val: return val
+	except: pass
+	return ''
+
 class Downloader:
 	def __init__(self, params):
 		self.params = params
 		self.params_get = self.params.get
 
 	def run(self):
-		kodi_utils.show_busy_dialog()
+		if self.params_get('action') != 'meta.pack':
+			kodi_utils.show_busy_dialog()
 		self.download_prep()
 		self.get_url_and_headers()
-		if self.url in (None, 'None', ''): return self.return_notification(_notification='No URL found for Download. Pick another Source')
+		if self.url in (None, 'None', ''):
+			if getattr(self, '_download_url_notified', False):
+				return self.return_notification()
+			return self.return_notification(_notification=NO_DOWNLOAD_URL_MSG)
 		self.get_filename()
 		self.get_extension()
 		if not self.download_check():
@@ -119,6 +151,20 @@ class Downloader:
 		self.get_download_folder()
 		if not self.get_destination_folder(): return self.return_notification(_notification='Cancelled')
 		self.download_runner()
+
+	def _is_torbox_download(self, url=None):
+		if 'torbox' in (self.action or ''):
+			return True
+		if self.provider in ('torbox', 'TorBox', 'Torbox', 'tb_cloud'):
+			return True
+		try:
+			source = json.loads(self.source) if self.source else {}
+			if normalize_debrid_provider(source.get('debrid') or source.get('cache_provider', '')) == 'TorBox':
+				return True
+		except:
+			pass
+		check_url = (url or self.url or '').lower()
+		return 'tb-cdn' in check_url or 'torbox.app' in check_url
 
 	def download_prep(self):
 		if 'meta' in self.params:
@@ -131,13 +177,18 @@ class Downloader:
 			self.image = self.meta_get('poster') or kodi_utils.get_icon('box_office')
 			self.name = self.params_get('name')
 		else:
-			self.meta, self.name, self.year, self.season = None, None, None, None
+			self.meta, self.year, self.season = None, None, None
 			self.media_type = self.params_get('media_type')
-			self.title = clean_file_name(self.params_get('name'))
+			self.name = self.params_get('name')
+			self.title = clean_file_name(self.name or '')
 			self.image = self.params_get('image')
 		self.provider = self.params_get('provider')
 		self.action = self.params_get('action')
 		self.source = self.params_get('source')
+		self._download_url_notified = False
+		if self.action == 'meta.single' and self.source:
+			release = _release_name_from_source(self.source)
+			if release: self.name = release
 		self.final_name = None
 
 	def download_runner(self):
@@ -173,6 +224,60 @@ class Downloader:
 		if status in ('unpaused', 'cancelled'): kodi_utils.clear_property('mando.download_status.%s' % self.final_name)
 		return status
 
+	def _unrestrict_pack_file_link(self, link, provider):
+		'''Turn a pack file link into a downloadable CDN URL for the given debrid.'''
+		from modules.debrid import downloader_provider_slug
+		provider = downloader_provider_slug(provider)
+		if not link:
+			return None
+		if provider == 'real-debrid':
+			from apis.real_debrid_api import RealDebridAPI
+			return RealDebridAPI().unrestrict_link(link)
+		if provider == 'premiumize.me':
+			from apis.premiumize_api import PremiumizeAPI
+			return PremiumizeAPI().add_headers_to_url(link)
+		if provider == 'alldebrid':
+			from apis.alldebrid_api import AllDebridAPI
+			return AllDebridAPI().unrestrict_link(link)
+		if provider == 'torbox':
+			from apis.torbox_api import TorBoxAPI
+			api = TorBoxAPI()
+			url = api.unrestrict_link(link)
+			if not url:
+				self._download_url_notified = True
+				kodi_utils.hide_busy_dialog()
+				kodi_utils.notification('TorBox: Download link not ready. Wait until the torrent is finished in TorBox, then try again.', 4500)
+				return None
+			return api.add_headers_to_url(url)
+		if provider == 'offcloud':
+			return link
+		return None
+
+	def _resolve_pack_episode_url(self, source):
+		'''Match current episode inside a season/show pack — no extra file picker (Download File).'''
+		from modules.debrid import ExternalPackSource, normalize_debrid_provider
+		from modules.source_utils import seas_ep_filter, supported_video_extensions
+		if self.media_type != 'episode' or not self.season or not self.episode:
+			return None
+		pack_result = ExternalPackSource(source, meta=self.meta).browse_packs(download=True)
+		if not pack_result:
+			self._download_url_notified = True
+			return None
+		pack_choices, _pack_api = pack_result
+		extensions = supported_video_extensions()
+		season, episode = int(self.season), int(self.episode)
+		for item in sorted(pack_choices, key=lambda k: (k.get('filename') or '').lower()):
+			filename = (item.get('filename') or '').split('/')[-1]
+			if not filename or not item.get('link'):
+				continue
+			if not any(filename.lower().endswith(ext) for ext in extensions):
+				continue
+			if seas_ep_filter(season, episode, filename):
+				self.name = filename
+				provider = normalize_debrid_provider(source.get('debrid') or source.get('cache_provider', ''))
+				return self._unrestrict_pack_file_link(item.get('link'), provider)
+		return None
+
 	def get_url_and_headers(self):
 		url = self.params_get('url')
 		if url in (None, 'None', ''):
@@ -180,39 +285,31 @@ class Downloader:
 				try:
 					source = json.loads(self.source)
 					if source.get('scrape_provider', '') == 'easynews': source['url_dl'] = source['down_url']
+					kodi_utils.clear_property(PROP_RESOLVE_CANCEL)
+					cancelled = kodi_utils.get_property(PROP_RESOLVE_CANCEL) == 'true'
 					url = Sources().resolve_sources(source, meta=self.meta)
-					if 'torbox' in url:
+					if url and source.get('scrape_provider') == 'aiostreams':
+						from apis.aiostreams_api import resolve_download_url
+						url = resolve_download_url(source, url)
+					if not url and 'package' in source:
+						# Magnet resolve can miss pack filenames — match episode silently, then normal confirm/title flow.
+						url = self._resolve_pack_episode_url(source)
+					elif not url:
+						try:
+							kodi_utils.logger('Mando', 'Download resolve returned no URL (cancel_prop=%s provider=%s hash=%s)' % (
+								cancelled, source.get('cache_provider') or source.get('debrid'), (source.get('hash') or '')[:12]))
+						except Exception:
+							pass
+					if url and self._is_torbox_download(url):
 						from apis.torbox_api import TorBoxAPI
 						url = TorBoxAPI().add_headers_to_url(url)
-				except: pass
+				except Exception as exc:
+					try: kodi_utils.logger('Mando', 'Download resolve failed: %s' % exc)
+					except Exception: pass
+					url = None
 			elif self.action == 'meta.pack':
-				debrid_function = None
-				if self.provider in ('real-debrid', 'Real-Debrid'):
-					from apis.real_debrid_api import RealDebridAPI as debrid_function
-				elif self.provider in ('premiumize.me', 'Premiumize.me'):
-					from apis.premiumize_api import PremiumizeAPI as debrid_function
-				elif self.provider in ('alldebrid', 'AllDebrid'):
-					from apis.alldebrid_api import AllDebridAPI as debrid_function
-				elif self.provider in ('torbox', 'TorBox', 'Torbox'):
-					from apis.torbox_api import TorBoxAPI as debrid_function
 				link = self.params_get('pack_files', {}).get('link')
-				if not link:
-					url = None
-				elif debrid_function and self.provider in ('real-debrid', 'Real-Debrid'):
-					url = debrid_function().unrestrict_link(link)
-				elif debrid_function and self.provider in ('premiumize.me', 'Premiumize.me'):
-					url = debrid_function().add_headers_to_url(link)
-				elif debrid_function and self.provider in ('alldebrid', 'AllDebrid'):
-					url = debrid_function().unrestrict_link(link)
-				elif debrid_function and self.provider in ('torbox', 'TorBox', 'Torbox'):
-					api = debrid_function()
-					url = api.unrestrict_link(link)
-					if url:
-						url = api.add_headers_to_url(url)
-					else:
-						return self.return_notification(_notification='TorBox: Download link not ready. Wait until the torrent is finished in TorBox, then try Download Pack again.')
-				else:
-					url = None
+				url = self._unrestrict_pack_file_link(link, self.provider)
 		else:
 			if self.action.startswith('cloud'):
 				if '_direct' in self.action:
@@ -228,9 +325,18 @@ class Downloader:
 					url = PremiumizeAPI().add_headers_to_url(url)
 				elif 'torbox' in self.action:
 					from apis.torbox_api import TorBoxAPI
-					from indexers.torbox import resolve_tb
-					url = resolve_tb(self.params)
-					url = TorBoxAPI().add_headers_to_url(url)
+					api = TorBoxAPI()
+					file_id = self.params_get('url')
+					media_type = self.params_get('media_type') or 'torrent'
+					if media_type == 'torrent':
+						url = api.unrestrict_link(file_id)
+					elif media_type == 'webdl':
+						url = api.unrestrict_webdl(file_id)
+					else:
+						url = api.unrestrict_usenet(file_id)
+					if not url:
+						return self.return_notification(_notification='TorBox: Unable to resolve download link')
+					url = api.add_headers_to_url(url)
 				elif 'easynews' in self.action:
 					from indexers.easynews import resolve_easynews
 					url = resolve_easynews(self.params)
@@ -275,11 +381,31 @@ class Downloader:
 		else:
 			name_url = unquote(self.url)
 			file_name = clean_title(name_url.split('/')[-1])
-			if clean_title(self.title).lower() in file_name.lower():
+			if self.action == 'meta.single':
+				release = _release_name_from_source(self.source)
+				if release:
+					base = os.path.splitext(release)[0] or release
+					final_name = _sanitize_path_name(base) or _sanitize_path_name(release)
+				elif clean_title(self.title).lower() in file_name.lower():
+					final_name = os.path.splitext(urlparse(name_url).path)[0].split('/')[-1]
+				else:
+					name_ref = (self.name or self.title or '').strip()
+					if name_ref:
+						base = os.path.splitext(name_ref)[0] or name_ref
+						final_name = _sanitize_path_name(base) or _sanitize_path_name(name_ref)
+					else:
+						final_name = os.path.splitext(urlparse(name_url).path)[0].split('/')[-1]
+			elif clean_title(self.title).lower() in file_name.lower():
 				final_name = os.path.splitext(urlparse(name_url).path)[0].split('/')[-1]
 			else:
-				try: final_name = self.name.translate(None, r'\/:*?"<>|').strip('.')
-				except: final_name = os.path.splitext(urlparse(name_url).path)[0].split('/')[-1]
+				name_ref = (self.name or self.title or '').strip()
+				if name_ref:
+					base = os.path.splitext(name_ref)[0] or name_ref
+					final_name = _sanitize_path_name(base) or _sanitize_path_name(name_ref)
+				else:
+					final_name = os.path.splitext(urlparse(name_url).path)[0].split('/')[-1]
+			if not final_name:
+				final_name = os.path.splitext(urlparse(name_url).path)[0].split('/')[-1] or 'download'
 		self.final_name = safe_string(remove_accents(final_name))
 
 	def get_extension(self):
@@ -289,27 +415,36 @@ class Downloader:
 			ext = os.path.splitext(urlparse(self.url).path)[1][1:]
 			if not ext in kodi_utils.image_extensions(): ext = 'jpg'
 		else:
-			ext = os.path.splitext(urlparse(self.url).path)[1][1:]
+			ext = _video_extension(self.name or self.title or '')
+			if not ext:
+				ext = os.path.splitext(urlparse(self.url).path)[1][1:]
 			if not ext in kodi_utils.video_extensions(): ext = 'mp4'
 		ext = '.%s' % ext
 		self.extension = ext
 
 	def download_check(self):
+		self.content_unknown = False
 		self.resp = self.get_response()
 		if not self.resp: return False
-		try: self.content = int(self.resp.headers['Content-Length'])
+		try: self.content = int(self.resp.headers.get('Content-Length') or 0)
 		except: self.content = 0
-		try: self.resumable = 'bytes' in self.resp.headers['Accept-Ranges'].lower()
+		try: self.resumable = 'bytes' in self.resp.headers.get('Accept-Ranges', '').lower()
 		except: self.resumable = False
-		if self.content < 1: return False
 		self.size = 1024 * 1024
+		if self.content < 1:
+			self.content_unknown = True
+			self.mb = 0
+			kodi_utils.hide_busy_dialog()
+			return True
 		self.mb = self.content / (1024 * 1024)
 		if self.content < self.size: self.size = self.content
 		kodi_utils.hide_busy_dialog()
 		return True
 
 	def start_download(self):
-		if self.action == 'meta.pack':
+		if self.action == 'meta.single':
+			kodi_utils.notification('Download started: %s' % self.final_name.replace('.', ' ').replace('_', ' '), 3000, self.image)
+		elif self.action == 'meta.pack' and not self.params_get('pack_batch'):
 			kodi_utils.notification('Pack download started: %s' % self.final_name.replace('.', ' ').replace('_', ' '), 3000, self.image)
 		monitor_progress = self.action != 'image'
 		total, errors, count, resume, sleep_time  = 0, 0, 0, 0, 0
@@ -319,7 +454,10 @@ class Downloader:
 		while True:
 			downloaded = total
 			for c in chunks: downloaded += len(c)
-			percent = min(round(float(downloaded)*100 / self.content), 100)
+			if self.content_unknown:
+				percent = min(99, downloaded // (50 * 1024 * 1024)) if downloaded else 0
+			else:
+				percent = min(round(float(downloaded) * 100 / self.content), 100)
 			if monitor_progress:
 				status = self.check_status()
 				if status == 'paused':
@@ -333,7 +471,7 @@ class Downloader:
 			try:        
 				chunk  = self.resp.read(self.size)
 				if not chunk:
-					if percent < 99:
+					if not self.content_unknown and percent < 99:
 						error = True
 					else:
 						while len(chunks) > 0:
@@ -380,12 +518,16 @@ class Downloader:
 
 	def get_response(self, size=0):
 		try:
-			headers = self.headers
+			headers = dict(self.headers or {})
+			headers.setdefault('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+			if self._is_torbox_download():
+				headers.setdefault('Referer', 'https://torbox.app/')
 			if size > 0:
 				size = int(size)
 				headers['Range'] = 'bytes=%d-' % size
 			req = Request(self.url, headers=headers)
-			resp = urlopen(req, context=ssl.SSLContext(ssl.PROTOCOL_SSLv23), timeout=30)
+			timeout = 60 if self._is_torbox_download() else 30
+			resp = urlopen(req, context=ssl.create_default_context(), timeout=timeout)
 			return resp
 		except: return None
 
@@ -398,8 +540,13 @@ class Downloader:
 		self.remove_active_download()
 
 	def confirm_download(self):
-		return True if self.action in ('image', 'meta.pack') \
-		else kodi_utils.confirm_dialog(heading=self.final_name, text='Complete file is [B]%dMB[/B][CR]Continue with download?' % self.mb)
+		if self.action in ('image', 'meta.pack'):
+			return True
+		if getattr(self, 'content_unknown', False):
+			text = 'File size could not be determined from the server.[CR]Continue with download?'
+		else:
+			text = 'Complete file is [B]%dMB[/B][CR]Continue with download?' % self.mb
+		return kodi_utils.confirm_dialog(heading=self.final_name, text=text)
 
 	def return_notification(self, _notification=None, _ok_dialog=None):
 		kodi_utils.hide_busy_dialog()
@@ -423,15 +570,18 @@ def viewer(params):
 	handle = int(sys.argv[1])
 	fanart = kodi_utils.get_addon_fanart()
 	folder_path = download_directory(params['folder_type'])
-	dirs, files = kodi_utils.list_dirs(folder_path)
+	try: kodi_utils.make_directories(folder_path)
+	except: pass
+	try: dirs, files = kodi_utils.list_dirs(folder_path)
+	except: dirs, files = [], []
 	results = [(i, True) for i in dirs] + [(i, False) for i in files]
 	item_list = list(_process())
 	kodi_utils.add_items(handle, item_list)
 	kodi_utils.set_sort_method(handle, 'files')
-	kodi_utils.set_content(handle, '')
+	kodi_utils.set_content(handle, kodi_utils.MENU_FOLDER_CONTENT)
 	kodi_utils.set_category(handle, params.get('name'))
 	kodi_utils.end_directory(handle)
-	kodi_utils.set_view_mode('view.main', '')
+	kodi_utils.set_view_mode('view.main', kodi_utils.MENU_FOLDER_CONTENT, False)
 
 def manager(foo=None):
 	from windows.base_window import open_window

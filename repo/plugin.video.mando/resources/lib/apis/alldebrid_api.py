@@ -35,7 +35,7 @@ class AllDebridAPI:
 		else: p_dialog_insert = '[CR]Full link copied to clipboard[CR]OR Enter this Code: [B]%s[/B]' % user_code
 		sleep_interval = 5
 		content = 'Please Scan the QR Code%s[CR]' % p_dialog_insert
-		progressDialog = progress_dialog('All Debrid Authorize', qr_code)
+		progressDialog = progress_dialog('All Debrid Authorise', qr_code)
 		progressDialog.update(content, 0)
 		start, time_passed = time.time(), 0
 		sleep(2000)
@@ -54,7 +54,7 @@ class AllDebridAPI:
 				self.token = str(response['apikey'])
 				set_setting('ad.token', self.token)
 			except:
-				ok_dialog(text='Error')
+				ok_dialog(heading='All Debrid', text='Authorisation failed.')
 				break
 		try: progressDialog.close()
 		except: pass
@@ -63,35 +63,62 @@ class AllDebridAPI:
 			account_info = self._get('user')
 			set_setting('ad.account_id', str(account_info['user']['username']))
 			set_setting('ad.enabled', 'true')
-			ok_dialog(text='Success')
+			ok_dialog(heading='All Debrid', text='Account authorised.')
 
 	def revoke(self):
 		set_setting('ad.token', 'empty_setting')
 		set_setting('ad.account_id', 'empty_setting')
 		set_setting('ad.enabled', 'false')
-		notification('All Debrid Authorization Reset', 3000)
+		notification('All Debrid Authorisation Reset', 3000)
 
 	def account_info(self):
 		response = self._get('user')
 		return response
 
+	def _probe_magnets_get(self, url_append):
+		try:
+			if self.token in ('empty_setting', ''): return None, 'no_token'
+			url = self.base_url + 'magnet/upload?agent=%s&apikey=%s' % (self.user_agent, self.token) + url_append
+			result = requests.get(url, timeout=12).json()
+			if result.get('status') != 'success':
+				return None, (result.get('error') or {}).get('code') or 'request_failed'
+			data = result.get('data') or {}
+			return data.get('magnets') or [], None
+		except:
+			return None, 'request_failed'
+
 	def check_cache(self, hashes):
 		if isinstance(hashes, str): hashes = [hashes]
 		if not hashes or self.token in ('empty_setting', ''): return None
-		params = [('agent', self.user_agent), ('apikey', self.token)]
-		for h in hashes:
-			h = str(h).lower()
-			if len(h) == 40:
-				params.append(('magnets[]', h))
-		if len(params) <= 2: return None
-		try:
-			result = requests.get('%smagnet/instant' % self.base_url, params=params, timeout=20).json()
-			if result.get('status') != 'success': return None
-			data = result.get('data') or result
-			if isinstance(data, dict) and 'magnets' in data: return data
-			if isinstance(data, list): return {'magnets': data}
-		except: pass
-		return None
+		valid_hashes = [str(h).lower() for h in hashes if h and len(str(h)) == 40]
+		if not valid_hashes: return None
+		from modules.utils import chunks
+		all_magnets = []
+		errors = []
+		probe_ids = []
+		for hash_chunk in chunks(valid_hashes, 50):
+			url_append = ''.join('&magnets[]=%s' % h for h in hash_chunk)
+			magnets, err = self._probe_magnets_get(url_append)
+			if err in ('NO_SERVER', 'MAGNET_NO_SERVER'):
+				return {'magnets': [], 'error': err}
+			if err:
+				errors.append(str(err))
+				continue
+			if not magnets:
+				errors.append('empty_response')
+				continue
+			all_magnets.extend(magnets)
+			probe_ids.extend([m.get('id') for m in magnets if isinstance(m, dict) and m.get('id')])
+		if probe_ids:
+			Thread(target=self._delete_cache_probe_magnets, args=(probe_ids,)).start()
+		if not all_magnets:
+			return {'magnets': [], 'error': errors[0] if errors else 'request_failed'}
+		return {'magnets': all_magnets}
+
+	def _delete_cache_probe_magnets(self, magnet_ids):
+		for magnet_id in magnet_ids:
+			try: self.delete_transfer(magnet_id)
+			except: pass
 
 	def check_single_magnet(self, hash_string):
 		response = self.check_cache([hash_string])
@@ -160,8 +187,15 @@ class AllDebridAPI:
 		url = 'magnet/upload'
 		url_append = '&magnet=%s' % magnet
 		result = self._get(url, url_append)
-		if 'error' in result: return None
-		return result['magnets'][0].get('id', None)
+		if not result or 'error' in result:
+			return 'no_url'
+		try:
+			transfer_id = result['magnets'][0].get('id', None)
+		except (IndexError, KeyError, TypeError):
+			return 'no_url'
+		if not transfer_id:
+			return 'no_url'
+		return transfer_id
 
 	def list_transfer(self, transfer_id):
 		url = 'magnet/status'
@@ -202,10 +236,16 @@ class AllDebridAPI:
 											for x in _extras)][0]
 						except: media_id = None
 				else: media_id = max(valid_results, key=lambda x: x.get('s')).get('l', None)
-			if not store_to_cloud: Thread(target=self.delete_transfer, args=(transfer_id,)).start()
 			if media_id:
 				file_url = self.unrestrict_link(media_id)
-				if not any(file_url.lower().endswith(x) for x in extensions): file_url = None
+				if file_url and not any(file_url.lower().endswith(x) for x in extensions): file_url = None
+			# Delete after unlock so the magnet link is still valid for unrestrict.
+			# Recent unlock history has no per-item delete API (only full purge) — magnet cloud is cleared here.
+			if not store_to_cloud and transfer_id:
+				try: self.delete_transfer(transfer_id)
+				except: pass
+				try: self.clear_cache(clear_hashes=False)
+				except: pass
 			return file_url
 		except:
 			if transfer_id:
@@ -229,6 +269,23 @@ class AllDebridAPI:
 				if transfer_id: self.delete_transfer(transfer_id)
 			except: pass
 			return None
+
+	def list_magnet_files(self, transfer_id):
+		try:
+			response = self._post('magnet/files', {'id[]': [str(transfer_id)]})
+			if not response: return []
+			for magnet in response.get('magnets', []):
+				if str(magnet.get('id')) == str(transfer_id):
+					return self.correct_files_list(magnet.get('files', []))
+			magnets = response.get('magnets') or []
+			if magnets: return self.correct_files_list(magnets[0].get('files', []))
+		except: pass
+		return []
+
+	def cloud_file_links(self, transfer_id):
+		_, links = self.parse_magnet(transfer_id=transfer_id)
+		if links: return links
+		return self.list_magnet_files(transfer_id)
 
 	def parse_magnet(self, magnet_url=None, transfer_id=None):
 		if magnet_url:

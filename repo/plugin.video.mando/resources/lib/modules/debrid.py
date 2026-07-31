@@ -5,6 +5,7 @@ from apis.real_debrid_api import RealDebridAPI
 from apis.premiumize_api import PremiumizeAPI
 from apis.alldebrid_api import AllDebridAPI
 from apis.torbox_api import TorBoxAPI
+from apis.offcloud_api import OffcloudAPI
 from modules.source_utils import get_external_cache_status
 from modules.utils import chunks
 from modules.kodi_utils import show_busy_dialog, hide_busy_dialog, notification
@@ -13,18 +14,39 @@ from modules.settings import enabled_debrids_check
 
 def debrid_enabled():
 	return [
-	i[0] for i in [('Real-Debrid', 'rd'), ('Premiumize.me', 'pm'), ('AllDebrid', 'ad'), ('TorBox', 'tb')] if enabled_debrids_check(i[1])]
+	i[0] for i in [('Real-Debrid', 'rd'), ('Premiumize.me', 'pm'), ('AllDebrid', 'ad'), ('Offcloud', 'oc'), ('TorBox', 'tb')] if enabled_debrids_check(i[1])]
+
+def debrid_cache_check_available(enabled_debrid=None):
+	if not enabled_debrid: enabled_debrid = debrid_enabled()
+	return any(p in enabled_debrid for p in ('Real-Debrid', 'TorBox', 'Premiumize.me', 'Offcloud'))
+
+NO_DOWNLOAD_URL_MSG = 'No URL found for Download. Pick another Source'
+NO_CLOUD_ADD_MSG = 'No URL found for Add to Cloud. Pick another Source'
+BROWSE_NO_FILES_MSG = 'Could not list files for Browse — source may not be cached yet'
 
 def debrid_for_ext_cache_check(enabled_debrid=None):
-	if not enabled_debrid: enabled_debrid = debrid_enabled()
-	return any(i in ['Real-Debrid', 'AllDebrid'] for i in enabled_debrid)
+	return debrid_cache_check_available(enabled_debrid)
 
 def normalize_debrid_provider(provider):
 	if not provider:
 		return provider
 	if provider.startswith('Uncached '):
-		return provider[9:]
-	return provider
+		provider = provider[9:]
+	aliases = {
+		'offcloud': 'Offcloud',
+		'oc_cloud': 'Offcloud',
+		'torbox': 'TorBox',
+		'torbox cloud': 'TorBox',
+		'tb_cloud': 'TorBox',
+		'real-debrid': 'Real-Debrid',
+		'rd_cloud': 'Real-Debrid',
+		'premiumize.me': 'Premiumize.me',
+		'premiumize': 'Premiumize.me',
+		'pm_cloud': 'Premiumize.me',
+		'alldebrid': 'AllDebrid',
+		'ad_cloud': 'AllDebrid',
+	}
+	return aliases.get(str(provider).lower(), provider)
 
 def downloader_provider_slug(provider):
 	provider = normalize_debrid_provider(provider)
@@ -33,6 +55,7 @@ def downloader_provider_slug(provider):
 		'Premiumize.me': 'premiumize.me',
 		'AllDebrid': 'alldebrid',
 		'TorBox': 'torbox',
+		'Offcloud': 'offcloud',
 	}.get(provider, (provider or '').lower())
 
 def import_pack_api(provider):
@@ -42,6 +65,7 @@ def import_pack_api(provider):
 		'Premiumize.me': PremiumizeAPI,
 		'AllDebrid': AllDebridAPI,
 		'TorBox': TorBoxAPI,
+		'Offcloud': OffcloudAPI,
 	}
 	return api_map.get(provider)()
 
@@ -65,9 +89,11 @@ class ExternalPackSource:
 		hide_busy_dialog()
 		if not pack_choices:
 			if provider == 'TorBox':
-				notification('TorBox: No video files in this pack yet. Try again in a moment.', 4500)
+				notification('TorBox: No video file(s) yet. Try again in a moment.', 4500)
+			elif download:
+				notification(NO_DOWNLOAD_URL_MSG, 2500)
 			else:
-				notification('Error')
+				notification(BROWSE_NO_FILES_MSG, 4500)
 			return None
 		pack_choices.sort(key=lambda k: (k.get('filename') or '').lower())
 		if download:
@@ -76,19 +102,41 @@ class ExternalPackSource:
 
 def manual_add_magnet_to_cloud(params):
 	show_busy_dialog()
-	provider = normalize_debrid_provider(params.get('provider', ''))
-	debrid_list_modules = [('Real-Debrid', RealDebridAPI), ('Premiumize.me', PremiumizeAPI), ('AllDebrid', AllDebridAPI), ('TorBox', TorBoxAPI)]
-	function = [i[1] for i in debrid_list_modules if i[0] == provider][0]
+	provider = normalize_debrid_provider(params.get('provider') or params.get('debrid', ''))
+	debrid_list_modules = [('Real-Debrid', RealDebridAPI), ('Premiumize.me', PremiumizeAPI), ('AllDebrid', AllDebridAPI), ('Offcloud', OffcloudAPI), ('TorBox', TorBoxAPI)]
+	try:
+		function = [i[1] for i in debrid_list_modules if i[0] == provider][0]
+	except IndexError:
+		hide_busy_dialog()
+		return notification('Unsupported provider for Add to Cloud: %s' % (provider or 'Unknown'), 4500)
 	api = function()
-	result = api.create_transfer(params['magnet_url'])
+	magnet_url = (params.get('magnet_url') or '').strip()
+	info_hash = (params.get('info_hash') or params.get('hash') or '').strip().lower()
+	if magnet_url and not magnet_url.startswith('magnet:') and len(info_hash) == 40:
+		magnet_url = 'magnet:?xt=urn:btih:%s' % info_hash
+	if not magnet_url or magnet_url == 'None':
+		hide_busy_dialog()
+		return notification('No magnet/link to send to cloud', 4500)
+	if provider == 'Offcloud':
+		label = params.get('display_name') or params.get('name') or ''
+		ok, detail = api.add_to_cloud(magnet_url, title=label)
+		api.clear_cache()
+		hide_busy_dialog()
+		return notification(detail, 6000 if ok else 4500)
+	result = api.create_transfer(magnet_url)
 	api.clear_cache()
 	hide_busy_dialog()
-	if not result or result == 'failed':
-		return notification('Failed')
+	if result == 'failed':
+		return notification('Failed', 2500)
+	if not result or result == 'no_url':
+		return notification(NO_CLOUD_ADD_MSG, 2500)
 	if provider == 'TorBox':
+		from modules.settings import tb_notify_cloud_ready
 		label = params.get('display_name') or params.get('name') or ''
-		api.monitor_torrent_cloud_ready(result, label)
-		return notification('TorBox: Added — you will be notified when it is ready in Cloud', 4500)
+		if tb_notify_cloud_ready():
+			api.monitor_torrent_cloud_ready(result, label)
+			return notification('TorBox: Added — you will be notified when it is ready in Cloud Storage', 4500)
+		return notification('TorBox: Added — check TorBox History for progress', 4500)
 	notification('Success')
 
 def query_local_cache(hash_list):
@@ -157,10 +205,30 @@ def AD_check(hash_list, cached_hashes, data, active_debrid):
 		cached_results = set()
 		api = AllDebridAPI()
 		api_responded = False
-		for hash_chunk in chunks(unchecked_hashes, 100):
+		api_errors = []
+		try:
+			_, err = api._probe_magnets_get('&magnet=%s' % unchecked_hashes[0])
+			if err in ('NO_SERVER', 'MAGNET_NO_SERVER'):
+				from modules.kodi_utils import set_property, logger
+				set_property('mando.debrid_cache_api_error', str(err))
+				logger('DebridCacheCheck', 'provider=AllDebrid preflight=%s unchecked=%d' % (err, len(unchecked_hashes)))
+				return cached_hashes
+		except: pass
+		for hash_chunk in chunks(unchecked_hashes, 50):
 			try:
 				response = api.check_cache(hash_chunk)
-				magnets = (response or {}).get('magnets')
+				if not response: continue
+				if response.get('error'):
+					err_code = str(response.get('error'))
+					api_errors.append(err_code)
+					if err_code in ('NO_SERVER', 'MAGNET_NO_SERVER'):
+						try:
+							from modules.kodi_utils import set_property
+							set_property('mando.debrid_cache_api_error', err_code)
+						except: pass
+						break
+					continue
+				magnets = response.get('magnets')
 				if not magnets: continue
 				api_responded = True
 				chunk_hashes = [h.lower() for h in hash_chunk]
@@ -171,14 +239,36 @@ def AD_check(hash_list, cached_hashes, data, active_debrid):
 					if magnet_hash: cached_results.add(magnet_hash)
 			except: pass
 		if not api_responded:
-			add_to_local_cache([(h, 'False') for h in unchecked_hashes], 'ad', 2)
-			return cached_hashes
-		remaining = [h for h in unchecked_hashes if h not in cached_results]
-		if remaining and 'AllDebrid' in active_debrid:
+			from modules.kodi_utils import get_property
+			if 'AllDebrid' in active_debrid and not get_property('mando.debrid_cache_api_error'):
+				try:
+					fallback = get_external_cache_status('AllDebrid', unchecked_hashes, data, active_debrid) or []
+					cached_results.update(str(i).lower() for i in fallback if i)
+				except: pass
+			if not cached_results:
+				if not get_property('mando.debrid_cache_api_error'):
+					add_to_local_cache([(h, 'False') for h in unchecked_hashes], 'ad', 2)
+				try:
+					from modules.kodi_utils import logger, set_property, clear_property
+					logger('DebridCacheCheck', 'provider=AllDebrid unchecked=%d cached=0 api=%s errors=%s' % (
+						len(unchecked_hashes), api_responded, ','.join(api_errors[:3]) or 'none'))
+					if api_errors and all(e in ('NO_SERVER', 'MAGNET_NO_SERVER') for e in api_errors):
+						set_property('mando.debrid_cache_api_error', 'NO_SERVER')
+					elif not get_property('mando.debrid_cache_api_error'):
+						clear_property('mando.debrid_cache_api_error')
+				except: pass
+				return cached_hashes
 			try:
-				fallback = get_external_cache_status('AllDebrid', remaining, data, active_debrid) or []
-				cached_results.update(str(i).lower() for i in fallback if i)
+				from modules.kodi_utils import clear_property
+				clear_property('mando.debrid_cache_api_error')
 			except: pass
+		else:
+			remaining = [h for h in unchecked_hashes if h not in cached_results]
+			if remaining and 'AllDebrid' in active_debrid:
+				try:
+					fallback = get_external_cache_status('AllDebrid', remaining, data, active_debrid) or []
+					cached_results.update(str(i).lower() for i in fallback if i)
+				except: pass
 		cached_append = cached_hashes.append
 		process_list = []
 		process_append = process_list.append
@@ -190,6 +280,12 @@ def AD_check(hash_list, cached_hashes, data, active_debrid):
 			process_append((h, cached))
 		if not cached_results: expires = 2
 		add_to_local_cache(process_list, 'ad', expires)
+		try:
+			from modules.kodi_utils import logger, clear_property
+			clear_property('mando.debrid_cache_api_error')
+			logger('DebridCacheCheck', 'provider=AllDebrid unchecked=%d cached=%d api=%s errors=%s' % (
+				len(unchecked_hashes), len(cached_results), api_responded, ','.join(api_errors[:3]) or 'none'))
+		except: pass
 	return cached_hashes
 
 def PM_check(hash_list, cached_hashes):
@@ -217,26 +313,69 @@ def PM_check(hash_list, cached_hashes):
 		add_to_local_cache(process_list, 'pm', expires)
 	return cached_hashes
 
-def TB_check(hash_list, cached_hashes):
-	expires = 24
-	cached_hashes, unchecked_hashes = cached_check(hash_list, cached_hashes, 'tb')
+def _tb_cached_hash_set(api_response):
+	if not api_response or not api_response.get('success'):
+		return set()
+	data = api_response.get('data')
+	cached = set()
+	if isinstance(data, dict):
+		for key, value in data.items():
+			if value in (True, 1, '1', 'true'):
+				cached.add(str(key).lower())
+			elif isinstance(value, dict) and value.get('hash'):
+				cached.add(str(value['hash']).lower())
+	elif isinstance(data, list):
+		for item in data:
+			if isinstance(item, dict) and item.get('hash'):
+				cached.add(str(item['hash']).lower())
+			elif isinstance(item, str):
+				cached.add(item.lower())
+	return cached
+
+def OC_check(hash_list, cached_hashes):
+	cached_hashes, unchecked_hashes = cached_check(hash_list, cached_hashes, 'oc')
 	if unchecked_hashes:
-		results = TorBoxAPI().check_cache(unchecked_hashes)
+		results = OffcloudAPI().check_cache(unchecked_hashes)
 		if results:
 			cached_append = cached_hashes.append
 			process_list = []
 			process_append = process_list.append
 			try:
-				data = results['data']
-				results = [i['hash'] for i in data]
+				results = results['cachedItems']
 				for h in unchecked_hashes:
 					cached = 'False'
 					if h in results:
 						cached_append(h)
 						cached = 'True'
 					process_append((h, cached))
-			except:
+			except Exception:
 				for i in unchecked_hashes: process_append((i, 'False'))
-		else: process_list, expires  = [(h, 'False') for h in unchecked_hashes], 2
+			add_to_local_cache(process_list, 'oc')
+	return cached_hashes
+
+def TB_check(hash_list, cached_hashes):
+	expires = 24
+	cached_hashes, unchecked_hashes = cached_check(hash_list, cached_hashes, 'tb')
+	if unchecked_hashes:
+		cached_append = cached_hashes.append
+		process_list = []
+		process_append = process_list.append
+		cached_set = set()
+		api = TorBoxAPI()
+		try:
+			for offset in range(0, len(unchecked_hashes), 100):
+				chunk = unchecked_hashes[offset:offset + 100]
+				results = api.check_cache(chunk)
+				if results:
+					cached_set.update(_tb_cached_hash_set(results))
+			for h in unchecked_hashes:
+				h_lower = str(h).lower()
+				if h_lower in cached_set:
+					cached_append(h)
+					process_append((h, 'True'))
+				else:
+					process_append((h, 'False'))
+		except:
+			for i in unchecked_hashes: process_append((i, 'False'))
 		add_to_local_cache(process_list, 'tb', expires)
 	return cached_hashes

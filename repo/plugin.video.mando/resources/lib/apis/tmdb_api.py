@@ -65,9 +65,14 @@ def tvshow_external_id(external_source, external_id, api_key):
 		string = 'tvshow_external_id_%s_%s' % (external_source, external_id)
 		url = 'https://api.themoviedb.org/3/find/%s?api_key=%s&external_source=%s' % (external_id, api_key, external_source)
 		result = cache_function(get_tmdb, string, url)
-		result = result['tv_results']
-		if result: return result[0]
-		else: return None
+		tv_results = result.get('tv_results') or []
+		if tv_results: return tv_results[0]
+		# Season-split anime IMDb ids often map to an episode/season, not the show record.
+		for key in ('tv_episode_results', 'tv_season_results'):
+			for row in result.get(key) or []:
+				show_id = row.get('show_id')
+				if show_id: return {'id': show_id}
+		return None
 	except: return None
 
 def tmdb_movies_oscar_winners(page_no):
@@ -484,8 +489,8 @@ def tmdb_anime_genres(genre_id, page_no):
 def tmdb_anime_providers(provider, page_no):
 	api_key = tmdb_api_key()
 	if api_key in (None, 'empty_setting', ''): return no_api_key()
-	string = 'tmdb_anime_providers_%s_%s' % (provider, page_no)
-	url = 'https://api.themoviedb.org/3/discover/tv?api_key=%s&with_keywords=210048&watch_region=US&with_watch_providers=%s&include_null_first_air_dates=false' \
+	string = 'tmdb_anime_providers2_%s_%s' % (provider, page_no)
+	url = 'https://api.themoviedb.org/3/discover/tv?api_key=%s&sort_by=popularity.desc&with_keywords=210024&watch_region=US&with_watch_providers=%s&include_null_first_air_dates=false' \
 	'&first_air_date.lte=%s&page=%s' % (api_key, provider, get_current_date(), page_no)
 	return lists_cache_object(get_data, string, url)
 

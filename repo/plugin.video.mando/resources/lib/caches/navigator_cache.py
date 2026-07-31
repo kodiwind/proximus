@@ -12,7 +12,7 @@ class NavigatorCache:
 	{'name': 'Search', 'mode': 'navigator.search', 'iconImage': 'search'},
 	{'name': 'Discover', 'mode': 'navigator.discover', 'iconImage': 'discover'},
 	{'name': 'Random Lists', 'mode': 'navigator.random_lists', 'iconImage': 'random'},
-	{'name': 'My Lists', 'mode': 'navigator.my_content', 'iconImage': 'lists'},
+	{'name': 'My Lists', 'mode': 'navigator.my_lists', 'iconImage': 'lists'},
 	{'name': 'My Services', 'mode': 'navigator.premium', 'iconImage': 'premium'},
 	{'name': 'Favorites', 'mode': 'navigator.favorites', 'iconImage': 'favorites'},
 	{'name': 'Downloads', 'mode': 'navigator.downloads', 'iconImage': 'downloads'},
@@ -25,7 +25,7 @@ class NavigatorCache:
 	{'name': 'Popular Today', 'mode': 'build_movie_list', 'action': 'tmdb_movies_popular_today', 'random_support': 'true', 'iconImage': 'popular_today'},
 	{'name': 'Premieres', 'mode': 'build_movie_list', 'action': 'tmdb_movies_premieres', 'random_support': 'true', 'iconImage': 'fresh'},
 	{'name': 'Latest Releases', 'mode': 'build_movie_list', 'action': 'tmdb_movies_latest_releases', 'random_support': 'true', 'iconImage': 'dvd'},
-	{'name': 'Most Watched', 'mode': 'build_movie_list', 'action': 'trakt_movies_most_watched', 'random_support': 'true', 'iconImage': 'most_watched'},
+	{'name': 'Most Watched', 'mode': 'build_movie_list', 'action': 'movies_most_watched', 'random_support': 'true', 'iconImage': 'most_watched'},
 	{'name': 'Most Favorited', 'mode': 'build_movie_list', 'action': 'trakt_movies_most_favorited', 'random_support': 'true', 'iconImage': 'favorites'},
 	{'name': 'Top 10 Box Office', 'mode': 'build_movie_list', 'action': 'trakt_movies_top10_boxoffice', 'iconImage': 'box_office'},
 	{'name': 'Blockbusters', 'mode': 'build_movie_list', 'action': 'tmdb_movies_blockbusters', 'random_support': 'true', 'iconImage': 'most_voted'},
@@ -49,7 +49,7 @@ class NavigatorCache:
 	{'name': 'Popular', 'mode': 'build_tvshow_list', 'action': 'tmdb_tv_popular', 'random_support': 'true', 'iconImage': 'popular'},
 	{'name': 'Popular Today', 'mode': 'build_tvshow_list', 'action': 'tmdb_tv_popular_today', 'random_support': 'true', 'iconImage': 'popular_today'},
 	{'name': 'Premieres', 'mode': 'build_tvshow_list', 'action': 'tmdb_tv_premieres', 'random_support': 'true', 'iconImage': 'fresh'},
-	{'name': 'Most Watched', 'mode': 'build_tvshow_list', 'action': 'trakt_tv_most_watched', 'random_support': 'true', 'iconImage': 'most_watched'},
+	{'name': 'Most Watched', 'mode': 'build_tvshow_list', 'action': 'tv_most_watched', 'random_support': 'true', 'iconImage': 'most_watched'},
 	{'name': 'Most Favorited', 'mode': 'build_tvshow_list', 'action': 'trakt_tv_most_favorited', 'random_support': 'true', 'iconImage': 'favorites'},
 	{'name': 'Airing Today', 'mode': 'build_tvshow_list', 'action': 'tmdb_tv_airing_today', 'random_support': 'true', 'iconImage': 'live'},
 	{'name': 'On the Air', 'mode': 'build_tvshow_list', 'action': 'tmdb_tv_on_the_air', 'random_support': 'true', 'iconImage': 'ontheair'},
@@ -75,7 +75,7 @@ class NavigatorCache:
 	{'name': 'Anime Popular', 'mode': 'build_tvshow_list', 'action': 'tmdb_anime_popular', 'random_support': 'true', 'iconImage': 'popular'},
 	{'name': 'Anime Popular Recent', 'mode': 'build_tvshow_list', 'action': 'tmdb_anime_popular_recent', 'random_support': 'true', 'iconImage': 'popular_today'},
 	{'name': 'Anime Premieres', 'mode': 'build_tvshow_list', 'action': 'tmdb_anime_premieres', 'random_support': 'true', 'iconImage': 'fresh'},
-	{'name': 'Anime Most Watched', 'mode': 'build_tvshow_list', 'action': 'trakt_anime_most_watched', 'random_support': 'true', 'iconImage': 'most_watched'},
+	{'name': 'Anime Most Watched', 'mode': 'build_tvshow_list', 'action': 'anime_most_watched', 'random_support': 'true', 'iconImage': 'most_watched'},
 	{'name': 'Anime Most Favorited', 'mode': 'build_tvshow_list', 'action': 'trakt_anime_most_favorited', 'random_support': 'true', 'iconImage': 'favorites'},
 	{'name': 'Anime On the Air', 'mode': 'build_tvshow_list', 'action': 'tmdb_anime_on_the_air', 'random_support': 'true', 'iconImage': 'ontheair'},
 	{'name': 'Anime Upcoming', 'mode': 'build_tvshow_list', 'action': 'tmdb_anime_upcoming', 'random_support': 'true', 'iconImage': 'lists'},
@@ -153,12 +153,15 @@ class NavigatorCache:
 		return contents
 
 	def currently_used_list(self, list_name):
-		try: used_list = self.get_memory_cache(list_name, 'edited') or self.get_memory_cache(list_name, 'default') \
+		used_list = None
+		try:
+			used_list = self.get_memory_cache(list_name, 'edited') or self.get_memory_cache(list_name, 'default') \
 						or self.get_list(list_name, 'edited') or self.get_list(list_name, 'default')
-		except: used_list = []
+		except: pass
 		if not used_list:
-			self.rebuild_database()
-			used_list = NavigatorCache.main_menus[list_name]
+			try: self.rebuild_database()
+			except: pass
+			used_list = NavigatorCache.main_menus.get(list_name) or []
 		return used_list
 
 	def rebuild_database(self):
@@ -219,8 +222,8 @@ class NavigatorCache:
 
 	def random_trakt_lists_personal(self):
 		return [
-			{'mode': 'random.build_movie_list', 'action': 'trakt_collection_lists', 'name': 'Random Trakt Movie Collection', 'iconImage': 'movies', 'random': 'true'},
-			{'mode': 'random.build_tvshow_list', 'action': 'trakt_collection_lists', 'name': 'Random Trakt TV Show Collection', 'iconImage': 'tv', 'random': 'true'},
+			{'mode': 'random.build_movie_list', 'action': 'trakt_collection_lists', 'name': 'Random Trakt Movie Library', 'iconImage': 'movies', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'trakt_collection_lists', 'name': 'Random Trakt TV Show Library', 'iconImage': 'tv', 'random': 'true'},
 			{'mode': 'random.build_movie_list', 'action': 'trakt_watchlist_lists', 'name': 'Random Trakt Movie Watchlist', 'iconImage': 'movies', 'random': 'true'},
 			{'mode': 'random.build_tvshow_list', 'action': 'trakt_watchlist_lists', 'name': 'Random Trakt TV Show Watchlist', 'iconImage': 'tv', 'random': 'true'},
 			{'mode': 'random.build_movie_list', 'action': 'trakt_recommendations', 'new_page': 'movies', 'name': 'Random Trakt Recommended Movies',
@@ -238,13 +241,76 @@ class NavigatorCache:
 	def random_trakt_lists_public(self):
 		return [
 			{'mode': 'trakt.list.get_trakt_user_lists', 'list_type': 'trending', 'category_name': 'Random Trending User Lists', 'name': 'Random Trending User Lists (All)',
-			'iconImage': 'trakt', 'random': 'true'},
+			'iconImage': 'trakt', 'random': 'true', 'shuffle': 'true'},
 			{'mode': 'random.build_trakt_lists', 'list_type': 'trending', 'category_name': 'Random Trending User Lists', 'name': 'Random Trending User Lists (Single)',
 			'iconImage': 'trakt', 'random': 'true'},
 			{'mode': 'trakt.list.get_trakt_user_lists', 'list_type': 'popular', 'category_name': 'Random Popular User Lists', 'name': 'Random Popular User Lists (All)',
-			'iconImage': 'trakt', 'random': 'true'},
+			'iconImage': 'trakt', 'random': 'true', 'shuffle': 'true'},
 			{'mode': 'random.build_trakt_lists', 'list_type': 'popular', 'category_name': 'Random Popular User Lists', 'name': 'Random Popular User Lists (Single)',
 			'iconImage': 'trakt', 'random': 'true'}
 				]
+
+	def random_simkl_lists(self):
+		return [
+			{'mode': 'random.build_movie_list', 'action': 'simkl_plantowatch', 'name': 'Random Simkl Movie Plan to Watch', 'iconImage': 'simkl', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'simkl_plantowatch', 'name': 'Random Simkl TV Plan to Watch', 'iconImage': 'simkl', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'simkl_plantowatch', 'is_anime_list': 'true', 'name': 'Random Simkl Anime Plan to Watch', 'iconImage': 'anime', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'simkl_watching', 'name': 'Random Simkl TV Watching', 'iconImage': 'simkl', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'simkl_watching', 'is_anime_list': 'true', 'name': 'Random Simkl Anime Watching', 'iconImage': 'anime', 'random': 'true'},
+			{'mode': 'random.build_movie_list', 'action': 'simkl_completed', 'name': 'Random Simkl Movie Completed', 'iconImage': 'simkl', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'simkl_completed', 'name': 'Random Simkl TV Completed', 'iconImage': 'simkl', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'simkl_completed', 'is_anime_list': 'true', 'name': 'Random Simkl Anime Completed', 'iconImage': 'anime', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'simkl_hold', 'name': 'Random Simkl TV On Hold', 'iconImage': 'simkl', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'simkl_hold', 'is_anime_list': 'true', 'name': 'Random Simkl Anime On Hold', 'iconImage': 'anime', 'random': 'true'},
+			{'mode': 'random.build_movie_list', 'action': 'simkl_dropped', 'name': 'Random Simkl Movie Dropped', 'iconImage': 'simkl', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'simkl_dropped', 'name': 'Random Simkl TV Dropped', 'iconImage': 'simkl', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'simkl_dropped', 'is_anime_list': 'true', 'name': 'Random Simkl Anime Dropped', 'iconImage': 'anime', 'random': 'true'},
+				]
+
+	def random_punchplay_lists(self):
+		return [
+			{'mode': 'random.build_movie_list', 'action': 'punchplay_watchlist', 'name': 'Random PunchPlay Movie Watchlist', 'iconImage': 'punchplay', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'punchplay_watchlist', 'name': 'Random PunchPlay TV Watchlist', 'iconImage': 'punchplay', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'punchplay_watchlist', 'is_anime_list': 'true', 'name': 'Random PunchPlay Anime Watchlist', 'iconImage': 'anime', 'random': 'true'},
+			{'mode': 'random.build_movie_list', 'action': 'punchplay_collection', 'name': 'Random PunchPlay Movie Collection', 'iconImage': 'punchplay', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'punchplay_collection', 'name': 'Random PunchPlay TV Collection', 'iconImage': 'punchplay', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'punchplay_collection', 'is_anime_list': 'true', 'name': 'Random PunchPlay Anime Collection', 'iconImage': 'anime', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'punchplay_watching', 'name': 'Random PunchPlay TV Watching', 'iconImage': 'punchplay', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'punchplay_watching', 'is_anime_list': 'true', 'name': 'Random PunchPlay Anime Watching', 'iconImage': 'anime', 'random': 'true'},
+			{'mode': 'random.build_movie_list', 'action': 'punchplay_completed', 'name': 'Random PunchPlay Movie Watched', 'iconImage': 'punchplay', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'punchplay_completed', 'name': 'Random PunchPlay TV Watched', 'iconImage': 'punchplay', 'random': 'true'},
+			{'mode': 'random.build_tvshow_list', 'action': 'punchplay_completed', 'is_anime_list': 'true', 'name': 'Random PunchPlay Anime Watched', 'iconImage': 'anime', 'random': 'true'},
+				]
+
+def migrate_my_content_nav_mode():
+	"""Rewrite stored menus that still use navigator.my_content to navigator.my_lists."""
+	nc = NavigatorCache()
+	changed = False
+	def _patch(items):
+		nonlocal changed
+		if not items: return items
+		out = []
+		for item in items:
+			row = dict(item)
+			if row.get('mode') == 'navigator.my_content':
+				row['mode'] = 'navigator.my_lists'
+				changed = True
+			out.append(row)
+		return out
+	try:
+		dbcon = connect_database('navigator_db')
+		for list_name, list_type, raw in dbcon.execute('SELECT list_name, list_type, list_contents FROM navigator').fetchall():
+			try: contents = eval(raw)
+			except: continue
+			patched = _patch(contents)
+			if patched != contents:
+				nc.set_list(list_name, list_type, patched)
+				changed = True
+	except: pass
+	if changed:
+		for list_name in NavigatorCache.main_menus:
+			nc.delete_memory_cache(list_name, 'default')
+			nc.delete_memory_cache(list_name, 'edited')
+	return changed
 
 navigator_cache = NavigatorCache()

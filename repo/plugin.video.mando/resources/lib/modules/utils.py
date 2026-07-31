@@ -3,13 +3,16 @@ import re
 import sys
 import time
 import random
+import inspect
 import _strptime
 import unicodedata
 from html import unescape
 from queue import SimpleQueue
+from contextlib import nullcontext
 from threading import Thread, activeCount
 from importlib import import_module
 from datetime import datetime, timedelta, date
+from caches.base_cache import open_db
 from modules.settings import max_threads
 from modules.kodi_utils import sleep, logger
 
@@ -17,21 +20,29 @@ class TaskPool:
 	def __init__(self):
 		self._queue = SimpleQueue()
 
-	def _thread_target(self, queue, target):
-		while not queue.empty():
-			try: target(*queue.get())
-			except Exception as e: logger('thread queue error', str(e))
+	def _thread_target(self, queue, target, db_name):
+		sig = inspect.signature(target)
+		uses_db = 'dbcon' in sig.parameters
+		context = open_db(db_name) if (uses_db and db_name) else nullcontext(None)
+		with context as dbcon:
+			while not queue.empty():
+				try:
+					args = queue.get()
+					if uses_db: target(*args, dbcon=dbcon)
+					else: target(*args)
+				except Exception as e: logger('thread queue error', str(e))
 
-	def tasks(self, _target, _list, _max_size=60):
+	def tasks(self, _target, _list, _max_size=20, db_name=None):
+		if not _list: return []
 		if not isinstance(_list[0], tuple): _list = [(i,) for i in _list]
 		[self._queue.put(tag) for tag in _list]
-		threads = [Thread(target=self._thread_target, args=(self._queue, _target)) for i in range(_max_size)]
+		threads = [Thread(target=self._thread_target, args=(self._queue, _target, db_name)) for i in range(_max_size)]
 		[i.start() for i in threads]
 		return threads
 
-	def tasks_enumerate(self, _target, _list, _max_size=60):
+	def tasks_enumerate(self, _target, _list, _max_size=20, db_name=None):
 		[self._queue.put((p, tag)) for p, tag in enumerate(_list, 1)]
-		threads = [Thread(target=self._thread_target, args=(self._queue, _target)) for i in range(_max_size)]
+		threads = [Thread(target=self._thread_target, args=(self._queue, _target, db_name)) for i in range(_max_size)]
 		[i.start() for i in threads]
 		return threads
 
@@ -113,19 +124,22 @@ def adjust_premiered_date(orig_date, adjust_hours):
 	adjusted_string = adjusted_datetime.strftime('%Y-%m-%d')
 	return adjusted_datetime.date(), adjusted_string
 
-def make_day(today, date, date_format='%Y-%m-%d', use_words=True):
-	if use_words:
-		day_diff = (date - today).days
-		if day_diff == -1: day = 'YESTERDAY'
-		elif day_diff == 0: day = 'TODAY'
-		elif day_diff == 1: day = 'TOMORROW'
-		elif 1 < day_diff < 7: day = date.strftime('%A').upper()
-		else:
-			try: day = date.strftime(date_format)
-			except ValueError: day = date.strftime('%Y-%m-%d')
+def make_day(today, date, date_format='%Y-%m-%d', use_words=True, include_date=False):
+	try: formatted = date.strftime(date_format)
+	except ValueError: formatted = date.strftime('%Y-%m-%d')
+	if not use_words:
+		return formatted
+	day_diff = (date - today).days
+	if day_diff == -1: day = 'YESTERDAY'
+	elif day_diff == 0: day = 'TODAY'
+	elif day_diff == 1: day = 'TOMORROW'
+	# Weekday names for both past and future within ~1 week (calendars).
+	elif include_date or (1 < abs(day_diff) < 7):
+		day = date.strftime('%A').upper()
 	else:
-		try: day = date.strftime(date_format)
-		except ValueError: day = date.strftime('%Y-%m-%d')
+		return formatted
+	if include_date:
+		return '%s %s' % (day, formatted)
 	return day
 
 def subtract_dates(date1, date2):
@@ -133,9 +147,15 @@ def subtract_dates(date1, date2):
 	return day
 
 def datetime_workaround(data, str_format):
-	try: datetime_object = datetime.strptime(data, str_format)
-	except: datetime_object = datetime(*(time.strptime(data, str_format)[0:6]))
-	return datetime_object
+	if not data: return None
+	for fmt in (str_format, '%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+		for parser in (datetime.strptime, lambda d, f: datetime(*(time.strptime(d, f)[0:6]))):
+			try: return parser(data, fmt)
+			except: pass
+	if 'T' in str(data):
+		try: return datetime(*(time.strptime(str(data).rstrip('Z').split('.')[0], '%Y-%m-%dT%H:%M:%S')[0:6]))
+		except: pass
+	raise ValueError("time data %r does not match format %r" % (data, str_format))
 
 def date_difference(current_date, compare_date, difference_tolerance, allow_postive_difference=False):
 	try:
@@ -271,44 +291,16 @@ def sec2time(sec, n_msec=3):
 	if d == 0: return pattern % (h, m, s)
 	return ('%d days, ' + pattern) % (d, h, m, s)
 
-def released_key(item):
-	if 'released' in item: return item['released'] or '2050-01-01'
-	if 'first_aired' in item: return item['first_aired'] or '2050-01-01'
-	return '2050-01-01'
-
 def title_key(title, ignore_articles):
-	if not ignore_articles: return title
-	try:
-		if title is None: title = ''
-		articles = ['the', 'a', 'an']
-		match = re.match(r'^((\w+)\s+)', title.lower())
-		if match and match.group(2) in articles: offset = len(match.group(1))
-		else: offset = 0
-		return title[offset:]
-	except: return title
+	from modules.list_sort import strip_articles
+	return strip_articles(title, ignore_articles)
 
 def sort_for_article(_list, _key, ignore_articles):
-	try:
-		if not ignore_articles: _list.sort(key=lambda k: k.get(_key))
-		else: _list.sort(key=lambda k: re.sub(r'(^the |^a |^an )', '', k.get(_key).lower()))
+	from modules.list_sort import strip_articles
+	try: _list.sort(key=lambda k: strip_articles(k.get(_key), ignore_articles))
 	except: pass
 	return _list
 	
-def sort_list(sort_key, sort_direction, list_data, ignore_articles):
-	try:
-		reverse = sort_direction != 'asc'
-		if sort_key == 'rank': return sorted(list_data, key=lambda x: x['rank'], reverse=reverse)
-		if sort_key == 'added': return sorted(list_data, key=lambda x: x['listed_at'], reverse=reverse)
-		if sort_key == 'title': return sorted(list_data, key=lambda x: title_key(x[x['type']].get('title'), ignore_articles), reverse=reverse)
-		if sort_key == 'released': return sorted(list_data, key=lambda x: released_key(x[x['type']]), reverse=reverse)
-		if sort_key == 'runtime': return sorted(list_data, key=lambda x: x[x['type']].get('runtime', 0), reverse=reverse)
-		if sort_key == 'popularity': return sorted(list_data, key=lambda x: x[x['type']].get('votes', 0), reverse=reverse)
-		if sort_key == 'percentage': return sorted(list_data, key=lambda x: x[x['type']].get('rating', 0), reverse=reverse)
-		if sort_key == 'votes': return sorted(list_data, key=lambda x: x[x['type']].get('votes', 0), reverse=reverse)
-		if sort_key == 'random': return sorted(list_data, key=lambda k: random.random())
-		return list_data
-	except: return list_data
-
 def paginate_list(item_list, page, limit=20, paginate_start=0):
 	if paginate_start:
 		item_list = item_list[paginate_start:]
@@ -331,19 +323,47 @@ def unzip(zip_location, destination_location, destination_check, show_busy=True)
 	if show_busy: hide_busy_dialog()
 	return status
 
+def _prune_qr_cache(folder, keep=30, min_age_secs=86400):
+	'''Drop old QR PNGs on a cool path — never while auth dialogs may still reference them.'''
+	try:
+		import glob
+		from os import path, remove
+		from time import time
+		now = time()
+		files = sorted(glob.glob(path.join(folder, 'qr_*.png')), key=path.getmtime, reverse=True)
+		for idx, stale in enumerate(files):
+			if idx < keep:
+				continue
+			if (now - path.getmtime(stale)) < min_age_secs:
+				continue
+			try: remove(stale)
+			except: pass
+	except: pass
+
 def make_qrcode(url):
-	if url == None: return
+	if not url:
+		return
 	import segno
 	from hashlib import sha1
 	from os import path
-	from modules.kodi_utils import addon_profile
+	from time import time
+	from modules.kodi_utils import addon_profile, translate_path, path_exists, make_directories, logger
 	try:
+		profile = translate_path(addon_profile())
+		make_directories(profile)
 		qr_id = sha1(url.encode('utf-8')).hexdigest()[:12]
-		art_path = path.join(addon_profile(), 'qr_%s.png' % qr_id)
-		qrcode = segno.make(url, micro=False)
-		qrcode.save(art_path, scale=20)
-	except: return
-	return art_path
+		stamp = int(time() * 1000)
+		art_path = path.join(profile, 'qr_%s_%s.png' % (qr_id, stamp))
+		segno.make(url, micro=False).save(art_path, scale=20)
+		if not path_exists(art_path):
+			import os
+			if not os.path.exists(art_path):
+				logger('Mando', 'make_qrcode: missing after save %s' % art_path)
+				return
+		return translate_path(art_path)
+	except Exception as e:
+		logger('Mando', 'make_qrcode failed: %s' % e)
+		return
 
 def make_tinyurl(url):
 	if not url:

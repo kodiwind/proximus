@@ -21,6 +21,7 @@ class Select(BaseDialog):
 		self.item_list = []
 		self.chosen_indexes = []
 		self.selected = None
+		self.control_id = None
 		self.set_properties()
 		self.make_menu()
 
@@ -97,44 +98,97 @@ class Select(BaseDialog):
 		self.setProperty('heading', self.heading)
 		self.setProperty('narrow_window', self.narrow_window)
 
+def _handle_scroll_area_nav(dialog, action, ok_id=10, cancel_id=11):
+	if getattr(dialog, 'scroll_focus', 'false') != 'true': return False
+	try:
+		if dialog.getFocusId() != 2070: return False
+	except: return False
+	aid = action.getId()
+	if aid == dialog.left_action:
+		dialog.setFocusId(cancel_id)
+		return True
+	if aid == dialog.right_action:
+		dialog.setFocusId(ok_id)
+		return True
+	return False
+
 class Confirm(BaseDialog):
+	_BTN_OK, _BTN_CANCEL, _BTN_THIRD = 3010, 3011, 3012
+	_LEGACY_BTN = {_BTN_OK: 10, _BTN_CANCEL: 11, _BTN_THIRD: 12}
+	_LEGACY_TO_BTN = {10: _BTN_OK, 11: _BTN_CANCEL, 12: _BTN_THIRD}
+
 	def __init__(self, *args, **kwargs):
 		BaseDialog.__init__(self, *args)
 		self.ok_label = kwargs['ok_label']
 		self.cancel_label = kwargs['cancel_label']
+		self.third_label = kwargs.get('third_label', '')
 		self.text = kwargs['text']
 		self.heading = kwargs['heading']
 		self.default_control = kwargs['default_control']
+		self.scroll = kwargs.get('scroll', 'false')
+		self.scroll_focus = kwargs.get('scroll_focus', 'false')
 		self.selected = None
 		self.set_properties()
 
+	def _focus_control(self, control_id):
+		try:
+			return self._LEGACY_TO_BTN.get(int(control_id), int(control_id))
+		except:
+			return self._BTN_CANCEL
+
 	def onInit(self):
-		self.setFocusId(self.default_control)
+		focus_id = 2070 if self.scroll_focus == 'true' else self._focus_control(self.default_control)
+		self.setFocusId(focus_id)
 
 	def run(self):
 		self.doModal()
 		return self.selected
 
 	def onClick(self, controlID):
-		self.selected = {10: True, 11: False}[controlID]
+		try:
+			controlID = int(controlID)
+		except:
+			return
+		if controlID not in (self._BTN_OK, self._BTN_CANCEL, self._BTN_THIRD):
+			return
+		if self.third_label:
+			self.selected = self._LEGACY_BTN[controlID]
+		else:
+			self.selected = controlID == self._BTN_OK
 		self.close()
 
 	def onAction(self, action):
-		if action in self.closing_actions: self.close()
+		cancel_id = self._BTN_CANCEL if not self.third_label else self._BTN_THIRD
+		if _handle_scroll_area_nav(self, action, ok_id=self._BTN_OK, cancel_id=cancel_id): return
+		try:
+			action_id = action.getId()
+		except:
+			action_id = action
+		if action_id in self.closing_actions:
+			self.close()
 
 	def set_properties(self):
 		self.setProperty('ok_label', self.ok_label)
 		self.setProperty('cancel_label', self.cancel_label)
+		self.setProperty('third_label', self.third_label)
+		self.setProperty('show_third_button', 'true' if self.third_label else 'false')
 		self.setProperty('text', self.text)
 		self.setProperty('heading', self.heading)
+		self.setProperty('scroll', self.scroll)
+		self.setProperty('scroll_focus', self.scroll_focus)
 
 class OK(BaseDialog):
 	def __init__(self, *args, **kwargs):
 		BaseDialog.__init__(self, *args)
-		self.ok_label = kwargs.get('ok_label')
+		self.ok_label = kwargs.get('ok_label') or 'OK'
 		self.text = kwargs['text']
 		self.heading = kwargs['heading']
+		self.scroll = kwargs.get('scroll', 'false')
+		self.scroll_focus = kwargs.get('scroll_focus', 'false')
 		self.set_properties()
+
+	def onInit(self):
+		self.setFocusId(2070 if self.scroll_focus == 'true' else 10)
 
 	def run(self):
 		self.doModal()
@@ -143,6 +197,7 @@ class OK(BaseDialog):
 		self.close()
 
 	def onAction(self, action):
+		if _handle_scroll_area_nav(self, action, ok_id=10, cancel_id=10): return
 		if action in self.closing_actions:
 			self.close()
 
@@ -150,3 +205,5 @@ class OK(BaseDialog):
 		self.setProperty('ok_label', self.ok_label)
 		self.setProperty('text', self.text)
 		self.setProperty('heading', self.heading)
+		self.setProperty('scroll', self.scroll)
+		self.setProperty('scroll_focus', self.scroll_focus)

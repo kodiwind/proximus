@@ -2,35 +2,56 @@
 from xbmc import Monitor
 import os
 import json
-import inspect
 from time import time
 from threading import Thread
-from caches.settings_cache import get_setting, set_setting, sync_settings
+from caches.settings_cache import get_setting, sync_settings
 from modules import kodi_utils
 
 pause_services_prop = 'mando.pause_services'
-firstrun_update_prop = 'mando.firstrun_update'
 current_skin_prop = 'mando.current_skin'
 trakt_service_string = 'TraktMonitor Service Update %s - %s'
-trakt_success_line_dict = {'success': 'Trakt Update Performed', 'no account': '(Unauthorized) Trakt Update Performed'}
+trakt_success_line_dict = {'success': 'Trakt Update Performed', 'no account': '(Unauthorised) Trakt Update Performed'}
 update_string = 'Next Update in %s minutes...'
+
+def _start_daemon(target):
+	Thread(target=target, daemon=True).start()
 
 class SetAddonConstants:
 	def run(self):
 		kodi_utils.logger('Mando', 'SetAddonConstants Service Starting')
 		import random
+		new_version = kodi_utils.addon_info('version')
+		prev_version = kodi_utils.get_property('mando.addon_version')
+		if prev_version and prev_version != new_version:
+			try:
+				from caches.settings_cache import clear_settings_boot_state
+				clear_settings_boot_state(clear_deferred=True)
+			except: pass
+			kodi_utils.clear_addon_xml_sync_version()
+			kodi_utils.logger('Mando', 'SetAddonConstants - version %s -> %s' % (prev_version, new_version))
+		icon_choice = get_setting('addon_icon_choice', 'resources/media/addon_icons/icon.png')
+		addon_path = kodi_utils.addon_info('path')
+		icon_path = kodi_utils.translate_path(os.path.join(addon_path, icon_choice))
+		icon_mini = os.path.join(addon_path, 'resources', 'media', 'addon_icons', 'minis', os.path.basename(icon_path))
 		addon_items = [
 			('mando.playback_key', str(random.randint(1000, 10000))),
-			('mando.addon_version', kodi_utils.addon_info('version')),
-			('mando.addon_path', kodi_utils.addon_info('path')),
+			('mando.addon_version', new_version),
+			('mando.addon_path', addon_path),
 			('mando.addon_profile', kodi_utils.translate_path(kodi_utils.addon_info('profile'))),
-			('mando.addon_icon', kodi_utils.translate_path(kodi_utils.addon_info('icon'))),
-			('mando.addon_icon_mini', os.path.join(kodi_utils.addon_info('path'), 'resources', 'media', 'addon_icons', 'minis',
-			os.path.basename(kodi_utils.translate_path(kodi_utils.addon_info('icon'))))),
+			('mando.addon_icon', icon_path),
+			('mando.addon_icon_mini', icon_mini),
 			('mando.addon_fanart', kodi_utils.addon_fanart())
 					]
 		for item in addon_items: kodi_utils.set_property(*item)
 		kodi_utils.clear_property('mando.widgets_refresh_scheduled')
+		kodi_utils.clear_property('mando.language_invoker_ready')
+		kodi_utils.clear_property('mando.addon_xml_applied')
+		kodi_utils.clear_property(kodi_utils.SHUTTING_DOWN_PROP)
+		kodi_utils.reset_boot_sync_gate()
+		try:
+			from modules.utils import _prune_qr_cache
+			_prune_qr_cache(kodi_utils.translate_path(kodi_utils.addon_info('profile')))
+		except: pass
 		return kodi_utils.logger('Mando', 'SetAddonConstants Service Finished')
 
 class DatabaseMaintenance:
@@ -43,92 +64,89 @@ class DatabaseMaintenance:
 class SyncSettings:
 	def run(self):
 		kodi_utils.logger('Mando', 'SyncSettings Service Starting')
+		from caches.settings_cache import sync_settings, settings_sync_needed
+		if not settings_sync_needed():
+			return kodi_utils.logger('Mando', 'SyncSettings Service Skipped')
 		sync_settings({'load_properties': False})
 		return kodi_utils.logger('Mando', 'SyncSettings Service Finished')
 
 class BootstrapSettings:
-	def run(self):
+	def run(self, monitor):
+		from caches.settings_cache import (
+			bootstrap_settings_needed, bootstrap_settings_properties,
+			refresh_widgets_after_db_migration, run_deferred_setup_background_if_needed,
+			service_bootstrap_needed, widgets_refresh_after_migration_needed, _properties_loaded,
+		)
+		if not service_bootstrap_needed():
+			return
 		kodi_utils.logger('Mando', 'BootstrapSettings Service Starting')
-		monitor = kodi_utils.kodi_monitor()
-		monitor.waitForAbort(2)
-		if monitor.abortRequested(): return
 		try:
-			from caches.settings_cache import bootstrap_settings_properties, refresh_widgets_after_db_migration
-			bootstrap_settings_properties()
-			refresh_widgets_after_db_migration()
+			from modules.sources import clear_orphan_nextep_play_stash
+			clear_orphan_nextep_play_stash()
+		except:
+			pass
+		if bootstrap_settings_needed() and not _properties_loaded():
+			monitor.waitForAbort(2)
+		if kodi_utils.service_shutting_down(monitor): return
+		try:
+			if bootstrap_settings_needed():
+				bootstrap_settings_properties()
+			if not kodi_utils.service_shutting_down(monitor) and widgets_refresh_after_migration_needed():
+				refresh_widgets_after_db_migration()
+			run_deferred_setup_background_if_needed()
 		except Exception as e:
 			kodi_utils.logger('BootstrapSettings', str(e))
 		return kodi_utils.logger('Mando', 'BootstrapSettings Service Finished')
 
 _custom_windows_thread_started = False
 
-def start_custom_windows_prepare():
+def start_custom_windows_prepare(monitor):
 	global _custom_windows_thread_started
 	if _custom_windows_thread_started: return
 	_custom_windows_thread_started = True
-	Thread(target=CustomWindowsPrepare().run, daemon=True).start()
+	_start_daemon(lambda: CustomWindowsPrepare().run(monitor))
 
 def run_deferred_service_setup():
 	global _custom_windows_thread_started
 	kodi_utils.logger('Mando', 'Deferred Service Setup Starting')
-	try: OnUpdateChanges().run()
-	except Exception as e: kodi_utils.logger('DeferredServiceSetup', 'OnUpdateChanges: %s' % e)
-	try: AddonXMLCheck().run()
-	except Exception as e: kodi_utils.logger('DeferredServiceSetup', 'AddonXMLCheck: %s' % e)
 	try:
 		from windows.base_window import ExtrasUtils
 		ExtrasUtils().run()
 	except Exception as e: kodi_utils.logger('DeferredServiceSetup', 'ExtrasUtils: %s' % e)
 	return kodi_utils.logger('Mando', 'Deferred Service Setup Finished')
 
-class OnUpdateChanges:
-	def run(self):
-		kodi_utils.logger('Mando', 'OnUpdateChanges Service Starting')
-		try:
-			for method in list(filter(lambda x: x[0] != 'run', inspect.getmembers(OnUpdateChanges, predicate=inspect.isfunction))):
-				if not get_setting('mando.updatechecks.%s' % method[0], 'false') == 'true':
-					method[1](self)
-					set_setting('updatechecks.%s' % method[0], 'true')
-		except: pass
-		return kodi_utils.logger('Mando', 'OnUpdateChanges Service Finished')
-
-	def fix_media_github_username(self):
-		stored = get_setting('mando.update.username', '')
-		if stored.replace('-', '').lower() == 'theredwizard' and stored != 'The-Red-Wizard':
-			set_setting('update.username', 'The-Red-Wizard')
-
 class CustomWindowsPrepare:
-	def run(self):
+	def run(self, monitor):
 		kodi_utils.logger('Mando', 'CustomWindowsPrepare Service Starting')
 		from windows.base_window import FontUtils
-		monitor, player = kodi_utils.kodi_monitor(), kodi_utils.kodi_player()
+		player = kodi_utils.kodi_player()
 		wait_for_abort, is_playing = monitor.waitForAbort, player.isPlayingVideo
 		kodi_utils.clear_property(current_skin_prop)
 		font_utils = FontUtils()
 		while not monitor.abortRequested():
 			font_utils.execute_custom_fonts()
 			wait_for_abort(20)
-		try: del monitor
-		except: pass
 		try: del player
 		except: pass
 		return kodi_utils.logger('Mando', 'CustomWindowsPrepare Service Finished')
 
 class TraktMonitor:
-	def run(self):
+	def run(self, monitor):
 		kodi_utils.logger('Mando', 'TraktMonitor Service Starting')
 		from apis.trakt_api import trakt_sync_activities
 		from modules.settings import trakt_user_active, trakt_sync_interval
-		monitor, player = kodi_utils.kodi_monitor(), kodi_utils.kodi_player()
+		player = kodi_utils.kodi_player()
 		wait_for_abort, is_playing = monitor.waitForAbort, player.isPlayingVideo
 		wait_for_abort(45)
 		while not monitor.abortRequested():
 			while is_playing() or kodi_utils.get_property(pause_services_prop) == 'true': wait_for_abort(10)
 			wait_time = 1800
 			try:
+				from caches.settings_cache import sync_kodi_profile_context
+				sync_kodi_profile_context()
 				sync_interval, wait_time = trakt_sync_interval()
 				next_update_string = update_string % sync_interval
-				if trakt_user_active: status = trakt_sync_activities()
+				if trakt_user_active(): status = trakt_sync_activities()
 				else: status = 'no_auth'
 				if status == 'failed': kodi_utils.logger('Mando', trakt_service_string % ('Failed. Error from Trakt', next_update_string))
 				elif status == 'no_auth': kodi_utils.logger('Mando', trakt_service_string % ('Not Run. No Current Trakt Account', next_update_string))
@@ -137,48 +155,135 @@ class TraktMonitor:
 						kodi_utils.logger('Mando', trakt_service_string % ('Success. %s' % trakt_success_line_dict[status], next_update_string))
 					else:
 						kodi_utils.logger('Mando', trakt_service_string % ('Success. No Changes Needed', next_update_string))# 'not needed'
-					if status == 'success' and get_setting('mando.trakt.refresh_widgets', 'false') == 'true':
-						kodi_utils.run_plugin({'mode': 'kodi_refresh'})
+					if status in ('success', 'not needed'):
+						kodi_utils.mark_boot_trakt_sync_ready()
+					if status == 'success' and not kodi_utils.service_shutting_down(monitor):
+						from modules.settings import provider_sync_refresh_widgets
+						if provider_sync_refresh_widgets(1):
+							try:
+								if not kodi_utils.playback_widget_refresh_recent(): kodi_utils.run_plugin({'mode': 'kodi_refresh'})
+							except Exception as exc:
+								kodi_utils.logger('Mando', 'Trakt widget refresh skipped: %s' % exc)
 			except Exception as e: kodi_utils.logger('Mando', trakt_service_string % ('Failed', 'The following Error Occured: %s' % str(e)))
 			wait_for_abort(wait_time)
-		try: del monitor
-		except: pass
 		try: del player
 		except: pass
 		return kodi_utils.logger('Mando', 'TraktMonitor Service Finished')
 
-class UpdateCheck:
-	def run(self):
-		if kodi_utils.get_property(firstrun_update_prop) == 'true': return
-		kodi_utils.logger('Mando', 'UpdateCheck Service Starting')
-		from modules.updater import update_check
-		from modules.settings import update_action, update_delay
-		end_pause = time() + update_delay()
-		monitor, player = kodi_utils.kodi_monitor(), kodi_utils.kodi_player()
+class SimklMonitor:
+	def run(self, monitor):
+		kodi_utils.logger('Mando', 'SimklMonitor Service Starting')
+		from apis.simkl_api import simkl_sync_activities
+		from modules.settings import simkl_user_active, simkl_sync_interval
+		player = kodi_utils.kodi_player()
 		wait_for_abort, is_playing = monitor.waitForAbort, player.isPlayingVideo
+		wait_for_abort(45)
 		while not monitor.abortRequested():
-			while time() < end_pause: wait_for_abort(1)
-			while kodi_utils.get_property(pause_services_prop) == 'true' or is_playing(): wait_for_abort(1)
-			update_check(update_action())
-			break
-		kodi_utils.set_property(firstrun_update_prop, 'true')
-		try: del monitor
-		except: pass
+			while is_playing() or kodi_utils.get_property(pause_services_prop) == 'true': wait_for_abort(10)
+			wait_time = 1800
+			try:
+				from caches.settings_cache import sync_kodi_profile_context
+				sync_kodi_profile_context()
+				sync_interval, wait_time = simkl_sync_interval()
+				next_update_string = 'Simkl Sync finished - Next Sync in %s minutes' % sync_interval
+				if simkl_user_active(): status = simkl_sync_activities()
+				else: status = 'no_auth'
+				if status == 'failed': kodi_utils.logger('Mando', 'Simkl Sync Failed')
+				elif status == 'no_auth': kodi_utils.logger('Mando', 'Simkl Sync Not Run - No Account')
+				else: kodi_utils.logger('Mando', 'Simkl Sync %s - %s' % ('OK' if status == 'success' else 'No Changes', next_update_string))
+				if status == 'success' and not kodi_utils.service_shutting_down(monitor):
+					from modules.settings import provider_sync_refresh_widgets
+					if provider_sync_refresh_widgets(2):
+						try:
+							if not kodi_utils.playback_widget_refresh_recent(): kodi_utils.run_plugin({'mode': 'kodi_refresh'})
+						except Exception as exc:
+							kodi_utils.logger('Mando', 'Simkl widget refresh skipped: %s' % exc)
+			except Exception as e: kodi_utils.logger('Mando', 'Simkl Sync Failed: %s' % str(e))
+			wait_for_abort(wait_time)
 		try: del player
 		except: pass
-		return kodi_utils.logger('Mando', 'UpdateCheck Service Finished')
+		return kodi_utils.logger('Mando', 'SimklMonitor Service Finished')
+
+class MdblistMonitor:
+	def run(self, monitor):
+		kodi_utils.logger('Mando', 'MDBListMonitor Service Starting')
+		from apis.mdblist_api import mdblist_sync_activities
+		from modules.settings import mdblist_user_active, mdblist_sync_interval
+		player = kodi_utils.kodi_player()
+		wait_for_abort, is_playing = monitor.waitForAbort, player.isPlayingVideo
+		wait_for_abort(60)
+		while not monitor.abortRequested():
+			while is_playing() or kodi_utils.get_property(pause_services_prop) == 'true': wait_for_abort(10)
+			wait_time = 1800
+			try:
+				from caches.settings_cache import sync_kodi_profile_context
+				sync_kodi_profile_context()
+				sync_interval, wait_time = mdblist_sync_interval()
+				next_update_string = 'MDBList Sync finished - Next Sync in %s minutes' % sync_interval
+				if mdblist_user_active(): status = mdblist_sync_activities()
+				else: status = 'no_auth'
+				if status == 'failed': kodi_utils.logger('Mando', 'MDBList Sync Failed')
+				elif status == 'no_auth': kodi_utils.logger('Mando', 'MDBList Sync Not Run - No Account')
+				else: kodi_utils.logger('Mando', 'MDBList Sync %s - %s' % ('OK' if status == 'success' else 'No Changes', next_update_string))
+				if status == 'success' and not kodi_utils.service_shutting_down(monitor):
+					from modules.settings import provider_sync_refresh_widgets
+					if provider_sync_refresh_widgets(3):
+						try:
+							if not kodi_utils.playback_widget_refresh_recent(): kodi_utils.run_plugin({'mode': 'kodi_refresh'})
+						except Exception as exc:
+							kodi_utils.logger('Mando', 'MDBList widget refresh skipped: %s' % exc)
+			except Exception as e: kodi_utils.logger('Mando', 'MDBList Sync Failed: %s' % str(e))
+			wait_for_abort(wait_time)
+		try: del player
+		except: pass
+		return kodi_utils.logger('Mando', 'MDBListMonitor Service Finished')
+
+class PunchPlayMonitor:
+	def run(self, monitor):
+		kodi_utils.logger('Mando', 'PunchPlayMonitor Service Starting')
+		from apis.punchplay_api import punchplay_sync_activities
+		from modules.settings import punchplay_user_active, punchplay_sync_interval
+		player = kodi_utils.kodi_player()
+		wait_for_abort, is_playing = monitor.waitForAbort, player.isPlayingVideo
+		wait_for_abort(55)
+		while not monitor.abortRequested():
+			while is_playing() or kodi_utils.get_property(pause_services_prop) == 'true': wait_for_abort(10)
+			wait_time = 1800
+			try:
+				from caches.settings_cache import sync_kodi_profile_context
+				sync_kodi_profile_context()
+				sync_interval, wait_time = punchplay_sync_interval()
+				next_update_string = 'PunchPlay Sync finished - Next Sync in %s minutes' % sync_interval
+				if punchplay_user_active(): status = punchplay_sync_activities()
+				else: status = 'no_auth'
+				if status == 'failed': kodi_utils.logger('Mando', 'PunchPlay Sync Failed')
+				elif status == 'no_auth': kodi_utils.logger('Mando', 'PunchPlay Sync Not Run - No Account')
+				else: kodi_utils.logger('Mando', 'PunchPlay Sync %s - %s' % ('OK' if status == 'success' else 'No Changes', next_update_string))
+				if status == 'success' and not kodi_utils.service_shutting_down(monitor):
+					from modules.settings import provider_sync_refresh_widgets
+					if provider_sync_refresh_widgets(4):
+						try:
+							if not kodi_utils.playback_widget_refresh_recent(): kodi_utils.run_plugin({'mode': 'kodi_refresh'})
+						except Exception as exc:
+							kodi_utils.logger('Mando', 'PunchPlay widget refresh skipped: %s' % exc)
+			except Exception as e: kodi_utils.logger('Mando', 'PunchPlay Sync Failed: %s' % str(e))
+			wait_for_abort(wait_time)
+		try: del player
+		except: pass
+		return kodi_utils.logger('Mando', 'PunchPlayMonitor Service Finished')
 
 class WidgetRefresher:
-	def run(self):
+	def run(self, monitor):
 		kodi_utils.logger('Mando', 'WidgetRefresher Service Starting')
 		from time import time
-		monitor, player = kodi_utils.kodi_monitor(), kodi_utils.kodi_player()
+		player = kodi_utils.kodi_player()
 		wait_for_abort, self.is_playing = monitor.waitForAbort, player.isPlayingVideo
 		wait_for_abort(10)
 		self.set_next_refresh(time())
 		while not monitor.abortRequested():
 			try:
 				wait_for_abort(10)
+				if kodi_utils.service_shutting_down(monitor): continue
 				offset = int(get_setting('mando.widget_refresh_timer', '60'))
 				if offset != self.offset:
 					self.set_next_refresh(time())
@@ -189,8 +294,6 @@ class WidgetRefresher:
 					kodi_utils.refresh_widgets()
 					self.set_next_refresh(time())
 			except: pass
-		try: del monitor
-		except: pass
 		try: del player
 		except: pass
 		return kodi_utils.logger('Mando', 'WidgetRefresher Service Finished')
@@ -215,49 +318,36 @@ class WidgetRefresher:
 		return 'plugin' not in kodi_utils.get_infolabel('Container.PluginName')
 
 class AutoStart:
-	def run(self):
+	def run(self, monitor):
 		kodi_utils.logger('Mando', 'AutoStart Service Starting')
 		from modules.settings import auto_start_mando
-		if auto_start_mando(): kodi_utils.run_addon()
+		if auto_start_mando() and not kodi_utils.service_shutting_down(monitor):
+			try:
+				from caches.settings_cache import ensure_settings_properties_loaded
+				ensure_settings_properties_loaded()
+			except Exception as e:
+				kodi_utils.logger('AutoStart', 'bootstrap: %s' % e)
+			kodi_utils.run_addon()
 		return kodi_utils.logger('Mando', 'AutoStart Service Finished')
+
+class ServiceExpiryAlerts:
+	def run(self, monitor):
+		kodi_utils.logger('Mando', 'ServiceExpiryAlerts Service Starting')
+		from modules.service_expiry import run_expiry_alerts
+		monitor.waitForAbort(60)
+		if not monitor.abortRequested() and not kodi_utils.service_shutting_down(monitor):
+			try: run_expiry_alerts()
+			except Exception as e: kodi_utils.logger('ServiceExpiryAlerts', str(e))
+		return kodi_utils.logger('Mando', 'ServiceExpiryAlerts Service Finished')
 
 class AddonXMLCheck:
 	def run(self):
 		kodi_utils.logger('Mando', 'AddonXMLCheck Service Starting')
-		from xml.dom.minidom import parse as mdParse
-		self.addon_xml = kodi_utils.translate_path('special://home/addons/plugin.video.mando/addon.xml')
-		self.root = mdParse(self.addon_xml)
-		self.change_list = []
-		self.check_property('reuse_language_invoker', 'reuselanguageinvoker')
-		self.check_property('addon_icon_choice', 'icon')
-		self.change_xml_file()
+		try: kodi_utils.reuse_language_invoker_check()
+		except Exception as e: kodi_utils.logger('AddonXMLCheck', str(e))
 		return kodi_utils.logger('Mando', 'AddonXMLCheck Service Finished')
 
-	def check_property(self, setting, tag_name):
-		current_addon_setting = get_setting('mando.%s' % setting, None)
-		if current_addon_setting is None: return
-		tag_instance = self.root.getElementsByTagName(tag_name)[0].firstChild
-		current_property = tag_instance.data
-		if current_property != current_addon_setting:
-			tag_instance.data = current_addon_setting
-			self.change_list.append(tag_name)
-
-	def change_xml_file(self):
-		if not self.change_list: return
-		if 'icon' in self.change_list: self.reassign_addon_icon()
-		kodi_utils.notification('Refreshing Addon XML. Restarting Addons')
-		new_xml = str(self.root.toxml()).replace('<?xml version="1.0" ?>', '')
-		with open(self.addon_xml, 'w') as f: f.write(new_xml)
-		kodi_utils.logger('Mando', 'AddonXMLCheck Service - Change Detected. Restarting Addons')
-		kodi_utils.execute_builtin('ActivateWindow(Home)', True)
-		kodi_utils.update_local_addons()
-		kodi_utils.disable_enable_addon()
-
-	def reassign_addon_icon(self):
-		from indexers.dialogs import addon_icon_choice
-		addon_icon_choice({'set_icon': get_setting('addon_icon_choice_name', 'icon.png')})
-
-class RedLightMonitor(Monitor):
+class MandoMonitor(Monitor):
 	def __init__ (self):
 		Monitor.__init__(self)
 		self.startServices()
@@ -269,13 +359,22 @@ class RedLightMonitor(Monitor):
 		except Exception as e: kodi_utils.logger('DatabaseMaintenance', str(e))
 		try: SyncSettings().run()
 		except Exception as e: kodi_utils.logger('SyncSettings', str(e))
-		Thread(target=BootstrapSettings().run).start()
-		start_custom_windows_prepare()
-		Thread(target=TraktMonitor().run).start()
-		Thread(target=UpdateCheck().run).start()
-		Thread(target=WidgetRefresher().run).start()
-		try: AutoStart().run()
+		try: AddonXMLCheck().run()
+		except Exception as e: kodi_utils.logger('AddonXMLCheck', str(e))
+		try:
+			from caches.settings_cache import service_bootstrap_needed
+			if service_bootstrap_needed():
+				_start_daemon(lambda: BootstrapSettings().run(self))
+		except Exception as e: kodi_utils.logger('BootstrapSettings', str(e))
+		start_custom_windows_prepare(self)
+		_start_daemon(lambda: TraktMonitor().run(self))
+		_start_daemon(lambda: SimklMonitor().run(self))
+		_start_daemon(lambda: MdblistMonitor().run(self))
+		_start_daemon(lambda: PunchPlayMonitor().run(self))
+		_start_daemon(lambda: WidgetRefresher().run(self))
+		try: AutoStart().run(self)
 		except Exception as e: kodi_utils.logger('AutoStart', str(e))
+		_start_daemon(lambda: ServiceExpiryAlerts().run(self))
 
 	def onNotification(self, sender, method, data):
 		if method in ('GUI.OnScreensaverActivated', 'System.OnSleep'):
@@ -284,8 +383,48 @@ class RedLightMonitor(Monitor):
 		elif method in ('GUI.OnScreensaverDeactivated', 'System.OnWake'):
 			kodi_utils.clear_property(pause_services_prop)
 			kodi_utils.logger('OnNotificationActions', 'UNPAUSING Mando Services Due to Device Awake')
+		elif method in ('Addon.OnDisabled', 'Addon.OnUninstalled'):
+			try:
+				info = json.loads(data)
+				if info.get('id') == 'plugin.video.mando':
+					kodi_utils.prepare_service_shutdown()
+					kodi_utils.logger('Mando', 'Service shutdown - addon disabled for update or uninstall')
+			except: pass
 
 if __name__ == '__main__':
+	# ----- AM Lite Trakt startup sync patch BEGIN -----
+	def wait_for_am_trakt(timeout=120, max_age=180):
+		import time
+		import xbmc
+		import xbmcaddon
+
+		if not xbmc.getCondVisibility('System.HasAddon(script.module.acctmgr)'):
+			return False
+
+		waited = 0
+		while waited < timeout:
+			try:
+				am = xbmcaddon.Addon('script.module.acctmgr')
+				ready = am.getSetting('am_trakt_ready')
+				last_prepare = am.getSetting('am_last_prepare')
+				if ready == 'true' and last_prepare:
+					age = int(time.time()) - int(last_prepare)
+					if 0 <= age <= max_age:
+						return True
+			except Exception:
+				pass
+			xbmc.sleep(1000)
+			waited += 1
+		return False
+
+	def _am_trakt_startup():
+		try:
+			wait_for_am_trakt()
+		except Exception:
+			pass
+
+	Thread(target=_am_trakt_startup, daemon=True).start()
+	# ----- AM Lite Trakt startup sync patch END -----
 	kodi_utils.logger('Mando', 'Main Monitor Service Starting')
-	RedLightMonitor().waitForAbort()
+	MandoMonitor().waitForAbort()
 	kodi_utils.logger('Mando', 'Main Monitor Service Finished')

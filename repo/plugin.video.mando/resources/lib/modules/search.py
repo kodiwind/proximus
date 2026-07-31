@@ -4,8 +4,15 @@ from urllib.parse import unquote
 from caches.main_cache import main_cache
 from indexers.people import person_search
 from indexers.easynews import search_easynews_image
-from modules.kodi_utils import close_all_dialog, external, build_url, kodi_dialog, execute_builtin, select_dialog, notification, kodi_refresh
+from modules.kodi_utils import close_all_dialog, external, build_url, kodi_dialog, execute_builtin, select_dialog, notification, kodi_refresh, folder_path, sanitize_folder_url, container_update
 # from modules.kodi_utils import logger
+
+def _refresh_search_history_if_visible():
+	try:
+		folder = folder_path()
+		if folder and 'navigator.search_history' in folder:
+			container_update(sanitize_folder_url(folder))
+	except: pass
 
 def get_key_id(params):
 	close_all_dialog()
@@ -28,11 +35,23 @@ def get_key_id(params):
 		url_params, string = {'mode': 'easynews.search_easynews'}, 'easynews_video_queries'
 	elif search_type == 'easynews_image':
 		url_params, string = {'mode': 'easynews.search_easynews_image'}, 'easynews_image_queries'
+	elif search_type == 'nzb_search':
+		url_params, string = {'mode': 'nzb.search_nzb'}, 'nzb_queries'
 	elif search_type == 'trakt_lists':
 		url_params, string = {'mode': 'trakt.list.search_trakt_lists'}, 'trakt_list_queries'
+	elif search_type == 'trakt_my_lists':
+		url_params, string = {'mode': 'trakt.list.search_trakt_my_lists'}, 'trakt_my_list_queries'
+	elif search_type == 'simkl_lists':
+		url_params, string = {'mode': 'simkl.list.search_simkl_lists'}, 'simkl_list_queries'
+	elif search_type == 'punchplay_lists':
+		url_params, string = {'mode': 'punchplay.list.search_punchplay_lists'}, 'punchplay_list_queries'
 	if string: add_to_search(key_id, string)
-	if search_type == 'people': return person_search(key_id)
-	if search_type == 'easynews_image': return search_easynews_image(key_id)
+	if search_type == 'people':
+		person_search(key_id)
+		return _refresh_search_history_if_visible()
+	if search_type == 'easynews_image':
+		search_easynews_image(key_id)
+		return _refresh_search_history_if_visible()
 	url_params.update({'query': key_id, 'key_id': key_id, 'name': 'Search Results for %s' % key_id})
 	return execute_builtin('ActivateWindow(Videos,%s,return)' if external() else 'Container.Update(%s)' % build_url(url_params))
 
@@ -66,7 +85,10 @@ def clear_search():
 	('Clear Keywords TV Show Search History', 'keyword_tmdb_tvshow_queries'),
 	('Clear EasyNews Search History', 'easynews_video_queries'),
 	('Clear EasyNews Search History', 'easynews_image_queries'),
-	('Clear Trakt List Search History', 'trakt_list_queries')]
+	('Clear NZB Indexer Search History', 'nzb_queries'),
+	('Clear Trakt User Lists Search History', 'trakt_list_queries'),
+	('Clear Trakt My Lists Search History', 'trakt_my_list_queries'),
+	('Clear Simkl List Search History', 'simkl_list_queries')]
 	try:
 		list_items = [{'line1': item[0]} for item in clear_history_list]
 		kwargs = {'items': json.dumps(list_items), 'narrow_window': 'true'}
