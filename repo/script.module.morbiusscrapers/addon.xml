@@ -1,4 +1,4 @@
-<addon id="script.module.morbiusscrapers" version="1.5.3" name="Morbius Scrapers" provider-name="morbiusscrapers">
+<addon id="script.module.morbiusscrapers" version="1.5.7" name="Morbius Scrapers" provider-name="morbiusscrapers">
 	<requires>
 		<import addon="xbmc.python" version="3.0.0" />
 		<import addon="script.module.requests" />

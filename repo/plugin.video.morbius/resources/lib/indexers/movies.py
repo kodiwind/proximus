@@ -242,7 +242,7 @@ class Movies:
 		self.current_date, self.current_time, self.watched_indicators = get_datetime(), get_current_timestamp(), settings.watched_indicators()
 		self.cm_sort_order = settings.cm_sort_order()
 		self.perform_cm_sort = self.cm_sort_order != settings.cm_default_order()
-		self.watched_title = 'Trakt' if self.watched_indicators == 1 else 'Simkl' if self.watched_indicators == 2 else 'Morbius'
+		self.watched_title = 'Trakt' if self.watched_indicators == 1 else 'Simkl' if self.watched_indicators == 2 else 'MDBList' if self.watched_indicators == 3 else 'Morbius'
 		watched_db = watched_status.get_database(self.watched_indicators)
 		self.watched_info, self.bookmarks = watched_status.watched_info_movie(watched_db), watched_status.get_bookmarks_movie(watched_db)
 		self.window_command = 'ActivateWindow(Videos,%s,return)' if self.is_external else 'Container.Update(%s)'

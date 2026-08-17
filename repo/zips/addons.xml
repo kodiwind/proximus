@@ -26,7 +26,7 @@
         </assets>
         <news>[COLOR gold]Check the Changelog in Tools &gt; Changelog &amp; Log Utils[/COLOR]</news>
     </extension>
-</addon><addon id="plugin.video.morbius" name="[COLORghostwhite]Morbius[/COLOR]" provider-name="[COLOR darkskyblue]The Hood[/COLOR]" version="4.4.0">
+</addon><addon id="plugin.video.morbius" name="[COLORghostwhite]Morbius[/COLOR]" provider-name="[COLOR darkskyblue]The Hood[/COLOR]" version="4.4.2">
     <requires>
         <import addon="xbmc.python" version="3.0.0" />
         <import addon="script.module.pil" version="1.1.7" />
@@ -172,7 +172,7 @@
             <fanart>fanart.jpg</fanart>
         </assets>
     </extension>
-</addon><addon id="script.module.morbiusscrapers" version="1.5.3" name="Morbius Scrapers" provider-name="morbiusscrapers">
+</addon><addon id="script.module.morbiusscrapers" version="1.5.7" name="Morbius Scrapers" provider-name="morbiusscrapers">
 	<requires>
 		<import addon="xbmc.python" version="3.0.0" />
 		<import addon="script.module.requests" />

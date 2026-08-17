@@ -99,7 +99,7 @@ def build_episode_list(params):
 	perform_cm_sort = cm_sort_order != settings.cm_default_order()
 	rpdb_api_key = settings.rpdb_api_key('tvshow')
 	playback_key = settings.playback_key()
-	watched_title = 'Trakt' if watched_indicators == 1 else 'Simkl' if watched_indicators == 2 else 'Morbius'
+	watched_title = 'Trakt' if watched_indicators == 1 else 'Simkl' if watched_indicators == 2 else 'MDBList' if watched_indicators == 3 else 'Morbius'
 	meta = tvshow_meta('tmdb_id', params.get('tmdb_id'), settings.tmdb_api_key(), settings.mpaa_region(), current_date)
 	meta_get = meta.get
 	tmdb_id, tvdb_id, imdb_id, tvshow_plot, orig_title = meta_get('tmdb_id'), meta_get('tvdb_id'), meta_get('imdb_id'), meta_get('plot'), meta_get('original_title')
@@ -314,7 +314,7 @@ def build_single_episode(list_type, params={}):
 	rpdb_api_key = settings.rpdb_api_key('tvshow')
 	playback_key = settings.playback_key()
 	watched_db = ws.get_database(watched_indicators)
-	watched_title = 'Trakt' if watched_indicators == 1 else 'Simkl' if watched_indicators == 2 else 'Morbius'
+	watched_title = 'Trakt' if watched_indicators == 1 else 'Simkl' if watched_indicators == 2 else 'MDBList' if watched_indicators == 3 else 'Morbius'
 	if list_type == 'episode.next':
 		include_unwatched, include_unaired, nextep_content = settings.nextep_include_unwatched(), settings.nextep_include_unaired(), settings.nextep_method()
 		sort_key, sort_direction = settings.nextep_sort_key(), settings.nextep_sort_direction()
@@ -324,7 +324,7 @@ def build_single_episode(list_type, params={}):
 		hidden_list = ws.get_hidden_progress_items(watched_indicators)
 		if hidden_list: data = [i for i in data if not i['media_ids']['tmdb'] in hidden_list]
 		if watched_indicators == 1: resformat, resinsert, list_type = '%Y-%m-%dT%H:%M:%S.%fZ', '2000-01-01T00:00:00.000Z', 'episode.next_trakt'
-		elif watched_indicators == 2: resformat, resinsert, list_type = '%Y-%m-%dT%H:%M:%S.%fZ', '2000-01-01T00:00:00.000Z', 'episode.next_simkl'
+		elif watched_indicators in (2, 3): resformat, resinsert, list_type = '%Y-%m-%dT%H:%M:%S.%fZ', '2000-01-01T00:00:00.000Z', 'episode.next_simkl'
 		else: resformat, resinsert, list_type = '%Y-%m-%d %H:%M:%S', '2000-01-01 00:00:00', 'episode.next_morbius'
 		if include_unwatched != 0:
 			if include_unwatched in (1, 3):

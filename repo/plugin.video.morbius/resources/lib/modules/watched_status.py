@@ -11,7 +11,7 @@ from modules import metadata, settings, tracking
 def get_database(watched_indicators=None):
 	# Do not use `watched_indicators or ...` — 0 is a valid built-in provider.
 	if watched_indicators is None: watched_indicators = settings.watched_indicators()
-	return connect_database({0: 'watched_db', 1: 'trakt_db', 2: 'simkl_db'}[watched_indicators])
+	return connect_database({0: 'watched_db', 1: 'trakt_db', 2: 'simkl_db', 3: 'mdblist_db'}[watched_indicators])
 
 def get_hidden_progress_items(watched_indicators):
 	try:
@@ -259,7 +259,7 @@ def erase_bookmark(media_type, media_id, season='', episode='', refresh='false')
 	try:
 		watched_indicators = settings.watched_indicators()
 		watched_db = get_database(watched_indicators)
-		if watched_indicators in (1, 2):
+		if watched_indicators in (1, 2, 3):
 			try:
 				if media_type == 'episode': resume_id = get_bookmarks_episode(str(media_id), season, watched_db)[int(episode)]['resume_id']
 				else: resume_id = get_bookmarks_movie()[str(media_id)]['resume_id']
@@ -275,7 +275,7 @@ def batch_erase_bookmark(watched_indicators, insert_list, action):
 		watched_db = get_database(watched_indicators)
 		if action == 'mark_as_watched': modified_list = [(i[0], i[1], i[2], i[3]) for i in insert_list]
 		else: modified_list = insert_list
-		if watched_indicators in (1, 2):
+		if watched_indicators in (1, 2, 3):
 			def _process():
 				for i in insert_list:
 					try:
@@ -296,15 +296,15 @@ def set_bookmark(params):
 		adjusted_current_time = float(curr_time) - 5
 		resume_point = round(adjusted_current_time/float(total_time)*100,1)
 		watched_indicators = settings.watched_indicators()
-		if watched_indicators in (1, 2):
+		if watched_indicators in (1, 2, 3):
 			if tracking.official_status(media_type) == False: return
 			# Persist locally first so resume survives even if remote scrobble/sync fails.
-			if watched_indicators == 2:
+			if watched_indicators in (2, 3):
 				last_played = get_last_played_value(watched_indicators)
 				dbcon = get_database(watched_indicators)
 				dbcon.execute('INSERT OR REPLACE INTO progress VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
 					(media_type, tmdb_id, season or '', episode or '', str(resume_point), str(curr_time), last_played, 0, title))
-			# Trakt needs a sync pull for local progress; Simkl also echoes in simkl_progress.
+			# Trakt needs a sync pull for local progress; Simkl/MDBList also echo locally above.
 			refresh_tracker = watched_indicators == 1
 			tracking.progress('set_progress', media_type, tmdb_id, resume_point, season, episode,
 				refresh_tracker=refresh_tracker, title=title or '')
@@ -327,7 +327,7 @@ def mark_movie(params):
 	if from_playback: refresh = False
 	tmdb_id, title = params.get('tmdb_id'), params.get('title')
 	watched_indicators = settings.watched_indicators()
-	if watched_indicators in (1, 2):
+	if watched_indicators in (1, 2, 3):
 		if from_playback and tracking.official_status(media_type) == False: sleep(1000)
 		elif not tracking.mark_watched(action, 'movies', tmdb_id): return notification('Error')
 		tracking.clear_watchlist_data('watchlist', media_type)
@@ -341,7 +341,7 @@ def mark_tvshow(params):
 	watched_indicators = settings.watched_indicators()
 	progress_backround = kodi_progress_background()
 	progress_backround.create('[B]Please Wait..[/B]', '')
-	if watched_indicators in (1, 2):
+	if watched_indicators in (1, 2, 3):
 		if not tracking.mark_watched(action, 'shows', tmdb_id, tvdb_id): return notification('Error')
 		tracking.clear_watchlist_data('watchlist', 'tvshow')
 	current_date = get_datetime()
@@ -377,7 +377,7 @@ def mark_season(params):
 	except: tvdb_id = 0
 	watched_indicators = settings.watched_indicators()
 	heading = '[B]Mark Watched %s[/B]' if action == 'mark_as_watched' else '[B]Mark Unwatched %s[/B]'
-	if watched_indicators in (1, 2):
+	if watched_indicators in (1, 2, 3):
 		if not tracking.mark_watched(action, 'season', tmdb_id, tvdb_id, season): return notification('Error')
 		tracking.clear_watchlist_data('watchlist', 'tvshow')
 	progress_backround = kodi_progress_background()
@@ -408,7 +408,7 @@ def mark_episode(params):
 	try: tvdb_id = int(params.get('tvdb_id', '0'))
 	except: tvdb_id = 0
 	watched_indicators = settings.watched_indicators()
-	if watched_indicators in (1, 2):
+	if watched_indicators in (1, 2, 3):
 		if from_playback and tracking.official_status(media_type) == False: sleep(1000)
 		elif not tracking.mark_watched(action, media_type, tmdb_id, tvdb_id, season, episode): return notification('Error')
 		tracking.clear_watchlist_data('watchlist', 'tvshow')

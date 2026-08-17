@@ -88,7 +88,7 @@ def build_season_list(params):
 	perform_cm_sort = cm_sort_order != settings.cm_default_order()
 	rpdb_api_key = settings.rpdb_api_key('tvshow')
 	use_name = settings.use_season_name()
-	watched_title = 'Trakt' if watched_indicators == 1 else 'Simkl' if watched_indicators == 2 else 'Morbius'
+	watched_title = 'Trakt' if watched_indicators == 1 else 'Simkl' if watched_indicators == 2 else 'MDBList' if watched_indicators == 3 else 'Morbius'
 	meta = tvshow_meta('tmdb_id', params['tmdb_id'], settings.tmdb_api_key(), settings.mpaa_region(), current_date)
 	meta_get = meta.get
 	tmdb_id, tvdb_id, imdb_id, show_title, show_year = meta_get('tmdb_id'), meta_get('tvdb_id'), meta_get('imdb_id'), meta_get('title'), meta_get('year') or '2050'

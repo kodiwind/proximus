@@ -61,6 +61,15 @@ def routing(sys):
                 _m = mode.split('.')[1]
                 if _m.isidentifier() and not _m.startswith('_'):
                         getattr(simkl_api, _m)(params)
+        elif 'mdblist.' in mode:
+                if '.list' in mode:
+                        from indexers import mdblist_lists
+                        _m = mode.split('.')[2]
+                        if _m.isidentifier() and not _m.startswith('_'): getattr(mdblist_lists, _m)(params)
+                else:
+                        from apis import mdblist_api
+                        _m = mode.split('.')[1]
+                        if _m.isidentifier() and not _m.startswith('_'): getattr(mdblist_api, _m)(params)
         elif 'build' in mode:
                 if mode == 'build_movie_list':
                         from indexers.movies import Movies

@@ -24,13 +24,21 @@ def simkl_user_active():
 	return get_setting('morbius.simkl.user', 'empty_setting') not in (None, 'empty_setting', '')
 
 
+def mdblist_api_key():
+	return get_setting('morbius.mdblist.api_key', '')
+
+
+def mdblist_user_active():
+	return get_setting('morbius.mdblist.user', 'empty_setting') not in (None, 'empty_setting', '')
+
+
 def tracking_provider():
 	"""
 	Legacy string alias of watched_indicators XOR.
-	Prefer watched_indicators() (0/1/2) everywhere new code is written.
-	  0 -> 'builtin', 1 -> 'trakt', 2 -> 'simkl'
+	Prefer watched_indicators() (0/1/2/3) everywhere new code is written.
+	  0 -> 'builtin', 1 -> 'trakt', 2 -> 'simkl', 3 -> 'mdblist'
 	"""
-	return {0: 'builtin', 1: 'trakt', 2: 'simkl'}.get(watched_indicators(), 'builtin')
+	return {0: 'builtin', 1: 'trakt', 2: 'simkl', 3: 'mdblist'}.get(watched_indicators(), 'builtin')
 
 def tmdblist_user_active():
 	return get_setting('morbius.tmdb.account_id', 'empty_setting') not in (None, 'empty_setting', '')
@@ -412,12 +420,14 @@ def watched_indicators():
 	  0 = Morbius built-in (watched_db)
 	  1 = Trakt (trakt_db) — requires an authorized Trakt account
 	  2 = Simkl (simkl_db) — requires an authorized Simkl account
+	  3 = MDBList (mdblist_db) — requires an authorized MDBList account
 	Falls back to 0 if the chosen provider is not authorized.
 	"""
 	try: val = int(get_setting('morbius.watched_indicators', '0'))
 	except: val = 0
 	if val == 1 and not trakt_user_active(): return 0
 	if val == 2 and not simkl_user_active(): return 0
+	if val == 3 and not mdblist_user_active(): return 0
 	return val
 
 def flatten_episodes():

@@ -4,22 +4,23 @@ Active watched-status dispatcher for Morbius.
 
 Source of truth: settings.watched_indicators()
   0 -> built-in (local watched_db only; callers short-circuit before here)
-  1 -> Trakt   (apis.trakt_api + trakt_db)
-  2 -> Simkl   (apis.simkl_api + simkl_db)
+  1 -> Trakt    (apis.trakt_api + trakt_db)
+  2 -> Simkl    (apis.simkl_api + simkl_db)
+  3 -> MDBList  (apis.mdblist_api + mdblist_db)
 
 XOR: only one provider owns mark-watched / scrobble / progress / calendar sync.
-Both Trakt and Simkl accounts may still be authorized for browsing personal lists;
-list browsing does not go through this module.
+Trakt, Simkl, and MDBList accounts may still be authorized for browsing personal
+lists; list browsing does not go through this module.
 """
 from modules import settings
 
 
 def provider():
-	"""Return 'builtin' | 'trakt' | 'simkl' from watched_indicators XOR."""
-	return {0: 'builtin', 1: 'trakt', 2: 'simkl'}.get(settings.watched_indicators(), 'builtin')
+	"""Return 'builtin' | 'trakt' | 'simkl' | 'mdblist' from watched_indicators XOR."""
+	return {0: 'builtin', 1: 'trakt', 2: 'simkl', 3: 'mdblist'}.get(settings.watched_indicators(), 'builtin')
 
 def is_external():
-	return provider() in ('trakt', 'simkl')
+	return provider() in ('trakt', 'simkl', 'mdblist')
 
 #=========================== READ / SYNC ===========================#
 def sync_activities(force_update=False):
@@ -30,6 +31,9 @@ def sync_activities(force_update=False):
 	if p == 'simkl':
 		from apis.simkl_api import simkl_sync_activities
 		return simkl_sync_activities(force_update)
+	if p == 'mdblist':
+		from apis.mdblist_api import mdblist_sync_activities
+		return mdblist_sync_activities(force_update)
 	return 'no account'
 
 def indicators_movies():
@@ -40,6 +44,9 @@ def indicators_movies():
 	if p == 'simkl':
 		from apis.simkl_api import simkl_indicators_movies
 		return simkl_indicators_movies()
+	if p == 'mdblist':
+		from apis.mdblist_api import mdblist_indicators_movies
+		return mdblist_indicators_movies()
 
 def indicators_tv():
 	p = provider()
@@ -49,6 +56,9 @@ def indicators_tv():
 	if p == 'simkl':
 		from apis.simkl_api import simkl_indicators_tv
 		return simkl_indicators_tv()
+	if p == 'mdblist':
+		from apis.mdblist_api import mdblist_indicators_tv
+		return mdblist_indicators_tv()
 
 def playback_progress():
 	p = provider()
@@ -58,6 +68,9 @@ def playback_progress():
 	if p == 'simkl':
 		from apis.simkl_api import simkl_playback_progress
 		return simkl_playback_progress()
+	if p == 'mdblist':
+		from apis.mdblist_api import mdblist_playback_progress
+		return mdblist_playback_progress()
 	return []
 
 #=========================== WRITE ===========================#
@@ -69,6 +82,9 @@ def mark_watched(action, media, media_id, tvdb_id=0, season=None, episode=None, 
 	if p == 'simkl':
 		from apis.simkl_api import simkl_mark_watched
 		return simkl_mark_watched(action, media, media_id, tvdb_id, season, episode, key)
+	if p == 'mdblist':
+		from apis.mdblist_api import mdblist_watched_status_mark
+		return mdblist_watched_status_mark(action, media, media_id, tvdb_id, season, episode, key)
 	return True
 
 def scrobble(action, media, media_id, percent, season=None, episode=None, resume_id=None, refresh_tracker=False, title=''):
@@ -79,6 +95,9 @@ def scrobble(action, media, media_id, percent, season=None, episode=None, resume
 	if p == 'simkl':
 		from apis.simkl_api import simkl_progress
 		return simkl_progress(action, media, media_id, percent, season, episode, resume_id, refresh_tracker, title=title)
+	if p == 'mdblist':
+		from apis.mdblist_api import mdblist_progress
+		return mdblist_progress(action, media, media_id, percent, season, episode, resume_id, refresh_tracker, title=title)
 
 # alias kept for readability at older call sites
 progress = scrobble

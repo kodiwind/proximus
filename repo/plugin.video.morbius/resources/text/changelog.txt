@@ -1,4 +1,19 @@
-[COLORdeepskyblue][B]VERSION 2.4.0[/B][/COLOR]
+[COLORdeepskyblue][B]VERSION 2.4.2[/B][/COLOR]
+
+ MDBList Integration
+
+• MDBList is now fully integrated directly into Morbius.
+• Added support for accessing and browsing MDBList lists from within the addon.
+• Integrated MDBList account functionality and list management.
+• Personal MDBList lists can now be accessed directly through Morbius.
+• Improved list handling and navigation for a smoother experience.
+• Further expands Morbius’ list and tracking options alongside existing services.
+
+ Improvements
+
+• Cleaner integration with the existing Morbius menu structure.
+• Improved compatibility with modern MDBList functionality.
+• Additional groundwork added for future MDBList features and enhancements.
 
 Simkl Watched Status
 
