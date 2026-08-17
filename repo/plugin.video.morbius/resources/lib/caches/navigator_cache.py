@@ -5,9 +5,6 @@ from modules.kodi_utils import get_property, set_property, clear_property
 
 class NavigatorCache:
 	root_list = [
-	{'name': 'Morbius', 'mode': 'navigator.morbius_dynamic', 'category_name': 'Morbius',
-	'url': 'https://filedn.com/l0jm1ttNAy54e9NylPPsPVk/Docs/xmls/builds/Morbius/New_Morbius/morbius_main_menu.txt',
-	'iconImage': 'special://home/addons/plugin.video.morbius/icon.png'},
 	{'name': 'Movies', 'mode': 'navigator.main', 'action': 'MovieList', 'iconImage': 'movies'},
 	{'name': 'TV Shows', 'mode': 'navigator.main', 'action': 'TVShowList', 'iconImage': 'tv'},
 	{'name': 'Anime', 'mode': 'navigator.main', 'action': 'AnimeList', 'iconImage': 'anime'},

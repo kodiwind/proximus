@@ -144,16 +144,6 @@ def resolve_ad(params):
 	from modules.player import morbiusPlayer
 	morbiusPlayer().run(resolved_link, 'video')
 
-def morbius_play(params):
-	"""Resolve an AllDebrid share link from a Morbius dynamic list and play it."""
-	url = params['url']
-	resolved_link = AllDebrid.unrestrict_link(url)
-	if not resolved_link:
-		kodi_utils.notification('AllDebrid: Unable to unlock this link')
-		return
-	from modules.player import morbiusPlayer
-	morbiusPlayer().run(resolved_link, 'video')
-
 def ad_delete(file_id):
 	if not kodi_utils.confirm_dialog(): return
 	result = AllDebrid.delete_transfer(file_id)

@@ -1,4 +1,4 @@
-<addon id="plugin.video.morbius" name="[COLORghostwhite]Morbius[/COLOR]" provider-name="[COLOR darkskyblue]The Hood[/COLOR]" version="4.4.2">
+<addon id="plugin.video.morbius" name="[COLORghostwhite]Morbius[/COLOR]" provider-name="[COLOR darkskyblue]The Hood[/COLOR]" version="4.4.2a">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
         <import addon="script.module.pil" version="1.1.7"/>

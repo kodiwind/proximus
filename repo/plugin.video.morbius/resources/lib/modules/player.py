@@ -32,23 +32,6 @@ class morbiusPlayer(xbmc.Player):
 				self.stop()
 			try: del self.kodi_monitor
 			except: pass
-		else:
-			self.wait_for_generic_playback_start()
-
-	def wait_for_generic_playback_start(self, timeout=8.0):
-		"""self.play() above is async and returns immediately. For 'generic' direct-URL
-		playback (obj == 'video' - AllDebrid/Real-Debrid/Premiumize downloads, saved
-		links, cloud browsing, Morbius list items, etc.) nothing else waits for
-		playback to begin, so this script can exit before Kodi's core sees the item
-		actually playing. When that happens, Kodi's Playlist Player times out the
-		original click and shows a false "PLAYBACK FAILED" error even though the
-		video is fine. Waiting briefly here for confirmed playback avoids that race."""
-		monitor = ku.kodi_monitor()
-		waited = 0.0
-		while waited < timeout:
-			if monitor.abortRequested() or self.isPlayingVideo(): return
-			monitor.waitForAbort(0.2)
-			waited += 0.2
 
 	def check_playback_start(self):
 		resolve_percent = 0

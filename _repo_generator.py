@@ -5,6 +5,7 @@
 """
 
 import os
+import sys
 import shutil
 import hashlib
 import zipfile
@@ -312,7 +313,41 @@ class Generator:
                 )
             )
 
-if __name__ == "__main__":
+def main():
+    # Make sure we're always operating from the folder this script lives in,
+    # regardless of how it was launched (double-click, .bat, another cwd, etc).
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(script_dir)
+
+    found_any = False
     for release in [r for r in KODI_VERSIONS if os.path.exists(r)]:
+        found_any = True
         print(release)
         Generator(release)
+
+    if not found_any:
+        print(
+            color_text(
+                "No release folders found ({}). Nothing to do.".format(
+                    ", ".join(KODI_VERSIONS)
+                ),
+                'yellow',
+            )
+        )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+    finally:
+        # When double-clicked on Windows, the console window closes the instant
+        # the script exits, which makes it look like it "flashed and did nothing"
+        # even on success. Pause so the window (and any error) stays visible.
+        # This is skipped automatically when run from run_repo_generator.bat or
+        # any other script, since stdin isn't an interactive console there.
+        if os.name == 'nt' and sys.stdin is not None and sys.stdin.isatty():
+            input("\nDone. Press Enter to exit...")

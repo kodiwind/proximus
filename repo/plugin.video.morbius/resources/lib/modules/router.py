@@ -199,9 +199,6 @@ def routing(sys):
                 elif mode == 'alldebrid.resolve_ad':
                         from indexers.alldebrid import resolve_ad
                         resolve_ad(params)
-                elif mode == 'alldebrid.morbius_play':
-                        from indexers.alldebrid import morbius_play
-                        morbius_play(params)
                 elif mode == 'alldebrid.ad_account_info':
                         from indexers.alldebrid import ad_account_info
                         ad_account_info()
