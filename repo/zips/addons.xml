@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='utf-8'?>
-<addons><addon id="plugin.video.mando" name="[COLOR gold]Mando[/COLOR]" provider-name="[COLOR ghostwhite]The Hood[/COLOR]" version="2.1.5">
+<addons><addon id="plugin.video.mando" name="[COLOR gold]Mando[/COLOR]" provider-name="[COLOR ghostwhite]The Hood[/COLOR]" version="2.5.3">
     <requires>
         <import addon="xbmc.python" version="3.0.1" />
         <import addon="script.module.pil" version="1.1.7" />
@@ -13,18 +13,18 @@
     <extension point="xbmc.addon.metadata">
         <reuselanguageinvoker>true</reuselanguageinvoker>
         <summary lang="en">[COLOR ghostwhite]This is the way...[/COLOR]</summary>
-        <description lang="en">[COLOR gold]* AllDebrid, Offcloud, Premiumize, Real Debrid and TorBox
+        <description lang="en">* AllDebrid, Offcloud, Premiumize, Real Debrid and TorBox
 * AIOStreams
 * EasyNews, NZB Indexers and Local Folders
-* MDBList, PunchPlay, Simkl, TMDb Lists, Trakt and WeTrakr[/COLOR]</description>
+* MDBList, PunchPlay, Simkl, TMDb Lists, Trakt and WeTrakr</description>
         <platform>all</platform>
-        <disclaimer lang="en">[COLOR gold]The author of this add-on does not host any content and has no affiliation with the content providers[/COLOR]</disclaimer>
+        <disclaimer lang="en">The author of this add-on does not host any content and has no affiliation with the content providers</disclaimer>
         <license>GPL-3.0</license>
         <assets>
             <icon>resources/media/addon_icons/icon.png</icon>
             <fanart>resources/media/fanart.jpg</fanart>
         </assets>
-        <news>[COLOR gold]Check the Changelog in Tools &gt; Changelog &amp; Log Utils[/COLOR]</news>
+        <news>Check the Changelog in Tools &gt; Changelog &amp; Log Utils</news>
     </extension>
 </addon><addon id="plugin.video.morbius" name="[COLORghostwhite]Morbius[/COLOR]" provider-name="[COLOR darkskyblue]The Hood[/COLOR]" version="4.4.2a">
     <requires>

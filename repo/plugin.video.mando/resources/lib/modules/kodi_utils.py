@@ -17,14 +17,17 @@ def random_valid_type_check():
 	return {'build_movie_list': 'movie', 'build_tvshow_list': 'tvshow', 'build_season_list': 'season', 'build_episode_list': 'episode',
 	'build_in_progress_episode': 'single_episode', 'build_recently_watched_episode': 'single_episode', 'build_next_episode': 'single_episode',
 	'build_my_calendar': 'single_episode', 'build_mdbl_calendar': 'single_episode', 'build_punchplay_calendar': 'single_episode',
+	'build_simkl_calendar': 'single_episode', 'build_simkl_public_calendar': 'single_episode',
 	'build_mdbl_next_up': 'single_episode', 'build_trakt_lists': 'trakt_list',
 	'trakt.list.build_trakt_list': 'trakt_list', 'build_trakt_lists_contents': 'trakt_list', 'personal_lists.build_personal_list': 'personal_list',
-	'build_personal_lists_contents': 'personal_list', 'tmdblist.build_tmdb_list': 'tmdb_list', 'build_tmdb_lists_contents': 'tmdb_list'}
+	'build_personal_lists_contents': 'personal_list', 'tmdblist.build_tmdb_list': 'tmdb_list', 'build_tmdb_lists_contents': 'tmdb_list',
+	'mdblist.build_mdbl_list': 'mdblist_list', 'build_mdblist_lists_contents': 'mdblist_list'}
 
 def random_episodes_check():
 	return {'build_in_progress_episode': 'episode.progress', 'build_recently_watched_episode': 'episode.recently_watched',
 	'build_next_episode': 'episode.next', 'build_my_calendar': 'episode.trakt', 'build_mdbl_calendar': 'episode.mdblist',
-	'build_mdbl_next_up': 'episode.mdblist_next', 'build_punchplay_calendar': 'episode.punchplay'}
+	'build_mdbl_next_up': 'episode.mdblist_next', 'build_punchplay_calendar': 'episode.punchplay',
+	'build_simkl_calendar': 'episode.simkl', 'build_simkl_public_calendar': 'episode.simkl_public'}
 
 def extras_button_label_values():
 	return {'movie':
@@ -149,18 +152,56 @@ def safe_browse_defaultt(path):
 		return ''
 	return path
 
+_ADDON_DATA_SPECIAL = 'special://profile/addon_data/plugin.video.mando/'
+
+def portable_addon_data_path(path, as_folder=True):
+	'''Prefer special:// when a path is under Mando addon_data; keep OS-wide paths absolute.'''
+	if not path or str(path).strip() in ('', 'None', 'empty_setting'):
+		return path
+	raw = str(path).strip()
+	slash_form = raw.replace('\\', '/')
+	special_prefix = 'special://profile/addon_data/plugin.video.mando'
+	if slash_form.lower().startswith(special_prefix):
+		result = slash_form
+		if as_folder and not result.endswith('/'):
+			result += '/'
+		return result
+	try:
+		if slash_form.lower().startswith('special://'):
+			native = os.path.normpath(translate_path(slash_form))
+		else:
+			native = os.path.normpath(raw)
+		profile = os.path.normpath(translate_path(_ADDON_DATA_SPECIAL))
+		native_cmp = os.path.normcase(native)
+		profile_cmp = os.path.normcase(profile)
+		if native_cmp == profile_cmp:
+			return _ADDON_DATA_SPECIAL
+		if not native_cmp.startswith(profile_cmp + os.sep):
+			return raw
+		rel = os.path.relpath(native, profile).replace('\\', '/')
+		if rel in ('.', ''):
+			return _ADDON_DATA_SPECIAL
+		result = _ADDON_DATA_SPECIAL + rel
+		if as_folder and not result.endswith('/'):
+			result += '/'
+		return result
+	except Exception:
+		return raw
+
 def browse_start_path(path, force_defaultt=False):
-	'''Native folder path for Kodi browse defaultt (address bar shows the real location).'''
+	'''Real filesystem path for Kodi browse defaultt.
+
+	Never pass special:// into Dialog.browse — that opens a virtual tree where
+	parent navigation cannot reach storage roots (so users cannot pick an
+	OS-wide Import/Export or download folder). force_defaultt is kept for
+	callers but no longer feeds special:// to the dialog.
+	'''
 	if not path or str(path).strip() in ('', 'None', 'empty_setting'):
 		return None
 	native = translate_path(path)
 	if not native or not str(native).strip():
 		return None
-	if force_defaultt:
-		# Import/export defaults use special:// paths; Kodi browse accepts them on all platforms.
-		if str(path).strip().lower().startswith('special://'):
-			return path
-		return native
+	# Android: opening inside a non-empty folder can block leaving via parent.
 	start = safe_browse_defaultt(native)
 	if start == '':
 		return ''
@@ -205,8 +246,10 @@ def browse_file(mask='', defaultt='', heading='Choose file', force_defaultt=Fals
 		return None
 	return result
 
+OFFICIAL_ADDON_ID = 'plugin.video.mando'
+
 def addon_info(info):
-	return xbmcaddon.Addon('plugin.video.mando').getAddonInfo(info)
+	return xbmcaddon.Addon(OFFICIAL_ADDON_ID).getAddonInfo(info)
 
 def addon_version():
 	return get_property('mando.addon_version') or addon_info('version')
@@ -233,30 +276,70 @@ def addon_fanart():
 		or 'special://home/addons/plugin.video.mando/resources/media/fanart.jpg'
 	)
 
-MEDIA_GITHUB_USER = 'kodiwind'
-MEDIA_GITHUB_REPO = 'proximus'
-MEDIA_GITHUB_RAW = 'https://raw.githubusercontent.com/%s/%s/main/packages/media' % (MEDIA_GITHUB_USER, MEDIA_GITHUB_REPO)
-LEGACY_MEDIA_GITHUB_RAW = 'https://raw.githubusercontent.com/kodiwind/proximus.github.io/main/packages/media'
+MEDIA_REMOTE_BASE = 'https://kodiwind.x10.mx/mando/media'
+MEDIA_REMOTE_FALLBACK_BASE = 'https://zeus-768.com/mando/media'
+_MEDIA_REMOTE_BASES = (MEDIA_REMOTE_BASE, MEDIA_REMOTE_FALLBACK_BASE)
+_MEDIA_BASE_PROPERTY = 'mando.media_remote_base'
+# Old GitHub raw hosts — remap stored shortcut/menu URLs onto the live media host.
+_MEDIA_GITHUB_PREFIXES = (
+	'https://raw.githubusercontent.com/The-Red-Wizard/TheRedWizard.github.io/main/packages/media',
+	'https://raw.githubusercontent.com/TheRedWizard/TheRedWizard.github.io/main/packages/media',
+	'https://raw.githubusercontent.com/kodiwind/proximus.github.io/main/packages/media',
+)
 # Estuary WideList row icons use ListItem.Icon only for Container.Content() — not files.
-MENU_FOLDER_CONTENT = '' 
+MENU_FOLDER_CONTENT = ''
+# EasyNews search / debrid cloud: skins (FENtastic, Aeon Nox, Nimbus) show thumbs when content is files.
+PREMIUM_FILES_CONTENT = 'files'
 
-
-def media_github_credentials():
-	return MEDIA_GITHUB_USER, MEDIA_GITHUB_REPO
+def media_remote_base():
+	"""Repo host when it answers; Zeus backup while it does not."""
+	cached = get_property(_MEDIA_BASE_PROPERTY)
+	if cached in _MEDIA_REMOTE_BASES:
+		return cached
+	try:
+		from caches.main_cache import main_cache
+		cached = main_cache.get('media_remote_base')
+		if cached in _MEDIA_REMOTE_BASES:
+			set_property(_MEDIA_BASE_PROPERTY, cached)
+			return cached
+	except:
+		pass
+	chosen, names = MEDIA_REMOTE_BASE, None
+	for base in _MEDIA_REMOTE_BASES:
+		names = _fetch_remote_icon_names(base)
+		if names:
+			chosen = base
+			break
+	set_property(_MEDIA_BASE_PROPERTY, chosen)
+	try:
+		from caches.main_cache import main_cache
+		main_cache.set('media_remote_base', chosen, expiration=1)
+		if names:
+			main_cache.set('all_icons_remote', names, expiration=168)
+	except:
+		pass
+	return chosen
 
 def get_icon(image_name, image_folder='icons', image_type='png'):
 	local_path = os.path.join(addon_info('path'), 'resources', 'media', image_folder, '%s.%s' % (image_name, image_type))
 	if os.path.exists(local_path):
 		return local_path
-	return '%s/%s/%s.%s' % (MEDIA_GITHUB_RAW, image_folder, image_name, image_type)
+	return '%s/%s/%s.%s' % (media_remote_base(), image_folder, image_name, image_type)
+
+def _remap_remote_media_url(url):
+	live = media_remote_base()
+	for prefix in _MEDIA_GITHUB_PREFIXES + _MEDIA_REMOTE_BASES:
+		if url.startswith(prefix):
+			if prefix == live:
+				return url
+			return live + url[len(prefix):]
+	return url
 
 def resolve_list_icon(icon, default_name='folder'):
 	if not icon:
 		return get_icon(default_name)
 	if icon.startswith('http'):
-		if icon.startswith(LEGACY_MEDIA_GITHUB_RAW):
-			return MEDIA_GITHUB_RAW + icon[len(LEGACY_MEDIA_GITHUB_RAW):]
-		return icon
+		return _remap_remote_media_url(icon)
 	icon_norm = icon.replace('\\', '/')
 	if icon_norm.startswith('special://') or 'plugin.video.mando/resources/media/' in icon_norm:
 		for folder in ('icons', 'flags', 'network_icons', 'results', 'rpdb_posters', 'themes'):
@@ -268,11 +351,22 @@ def resolve_list_icon(icon, default_name='folder'):
 	return get_icon(icon)
 
 def set_list_item_art(listitem, icon, fanart=None, banner=None, landscape=None):
+	# Fill every slot plugin skins actually bind. Do not put row thumbs on fanart here —
+	# Estuary/FENtastic fanart views use Art(fanart) as the backdrop.
 	art = {'icon': icon, 'poster': icon, 'thumb': icon, 'banner': banner or icon, 'landscape': landscape or icon}
 	if fanart: art['fanart'] = fanart
 	listitem.setArt(art)
-	try: listitem.setIconImage(icon) # Estuary WideList reads ListItem.Icon, not Art(thumb).
+	try: listitem.setIconImage(icon) # Estuary / FENtastic WideList: ListItem.Icon
 	except: pass
+	try: listitem.setThumbnailImage(icon) # FENtastic IconWall: ListItem.Thumb (not Art(thumb))
+	except: pass
+
+def finish_premium_listitem(listitem, icon, fanart=None, plot=' '):
+	"""Art after InfoTag so getVideoInfoTag does not drop EasyNews/cloud thumbs."""
+	try:
+		listitem.getVideoInfoTag().setPlot(plot)
+	except: pass
+	set_list_item_art(listitem, icon, fanart=fanart)
 
 def get_addon_fanart():
 	return get_property('mando.default_addon_fanart') or addon_fanart()
@@ -314,7 +408,9 @@ def set_browse_exit_params(list_mode='tvshow', action=None):
 
 def browse_list_exit_params(list_mode='tvshow', action=None):
 	folder_path = get_infolabel('Container.FolderPath')
-	parent_tokens = ('navigator.', 'mdblist.', 'punchplay.', 'simkl.', 'trakt.list', 'tmdblist.', 'personal_lists.', 'build_tmdb_lists_contents')
+	parent_tokens = (
+		'navigator.', 'mdblist.', 'punchplay.', 'simkl.', 'trakt.list', 'tmdblist.', 'personal_lists.',
+		'build_tmdb_lists_contents', 'build_mdblist_lists_contents')
 	if any(token in folder_path for token in parent_tokens):
 		return sanitize_folder_url(folder_path)
 	if action:
@@ -343,12 +439,20 @@ def list_collection_exit_params(params=None):
 		return build_folder_url({'mode': 'tmdblist.get_tmdb_lists'})
 	if mode in ('personal_lists.build_personal_list', 'random.build_personal_lists_contents'):
 		return build_folder_url({'mode': 'personal_lists.get_personal_lists'})
+	if mode in ('mdblist.build_mdbl_list', 'random.build_mdblist_lists_contents'):
+		list_type = params.get('list_type', 'my_lists')
+		if list_type == 'liked_lists':
+			return build_folder_url({'mode': 'mdblist.get_mdbl_liked_lists', 'name': 'Liked Lists'})
+		if list_type == 'user_lists':
+			return build_folder_url({'mode': 'mdblist.get_mdbl_top_lists', 'name': 'Popular MDBLists'})
+		return build_folder_url({'mode': 'mdblist.get_mdbl_lists', 'name': 'My Lists'})
 	return sanitize_folder_url(folder_path)
 
 _browse_action_exit_params = {
 	'mdblist_watchlist': {'mode': 'navigator.mdblist_watchlists'},
 	'mdblist_collection': {'mode': 'navigator.mdblist_library'},
 	'mdblist_droplist': {'mode': 'navigator.mdblist_lists'},
+	'trakt_droplist': {'mode': 'navigator.trakt_lists_personal'},
 	'trakt_collection': {'mode': 'navigator.trakt_collections'},
 	'trakt_collection_lists': {'mode': 'navigator.trakt_collections'},
 	'trakt_watchlist': {'mode': 'navigator.trakt_watchlists'},
@@ -396,15 +500,51 @@ _browse_subnav_exit_params = {
 	'tmdb_tv_discover': {'mode': 'navigator.discover_contents', 'media_type': 'tvshow'},
 }
 
+_LIST_FOLDER_PLOT_DESC_MAX = 500
+
+def list_folder_plot(description='', user='', item_count=None, likes=None):
+	"""Folder-row plot. Row labels already show user and item count.
+
+	With a description: N likes (if Trakt sent a number) then the clipped text.
+	Without: user · N items · N likes.
+	"""
+	try: desc = (description or '').strip()
+	except: desc = ''
+	if desc:
+		desc = desc.replace('\r\n', '\n').replace('\r', '\n').replace('\n', '[CR]')
+		while '[CR][CR][CR]' in desc:
+			desc = desc.replace('[CR][CR][CR]', '[CR][CR]')
+		if len(desc) > _LIST_FOLDER_PLOT_DESC_MAX:
+			cut = desc[:_LIST_FOLDER_PLOT_DESC_MAX]
+			cr = cut.rfind('[CR]')
+			sp = cut.rfind(' ')
+			if cr > _LIST_FOLDER_PLOT_DESC_MAX // 2: cut = cut[:cr]
+			elif sp > _LIST_FOLDER_PLOT_DESC_MAX // 2: cut = cut[:sp]
+			desc = cut.rstrip(' .;:') + '…'
+	likes_bit = ''
+	if likes not in (None, ''):
+		try: likes_bit = '%s likes' % int(likes)
+		except: likes_bit = '%s likes' % likes
+	if desc:
+		if likes_bit: return '%s[CR][CR]%s' % (likes_bit, desc)
+		return desc
+	bits = []
+	if user not in (None, '', 'None'): bits.append(str(user))
+	if item_count not in (None, '', '?'):
+		try: bits.append('%s items' % int(item_count))
+		except: bits.append('%s items' % item_count)
+	if likes_bit: bits.append(likes_bit)
+	return ' · '.join(bits) if bits else ' '
+
 def add_dir(handle, url_params, list_name, icon_image='folder', fanart_image=None, isFolder=True):
 	fanart = fanart_image or get_addon_fanart()
 	icon = get_icon(icon_image)
 	url = build_url(url_params)
 	listitem = make_listitem()
 	listitem.setLabel(list_name)
-	set_list_item_art(listitem, icon, fanart=fanart, banner=fanart)
-	info_tag = listitem.getVideoInfoTag(True)
+	info_tag = listitem.getVideoInfoTag()
 	info_tag.setPlot(' ')
+	set_list_item_art(listitem, icon, fanart=fanart, banner=fanart)
 	add_item(handle, url, listitem, isFolder)
 
 def make_listitem(offscreen=True):
@@ -517,7 +657,7 @@ def sync_scrape_progress_ui(percent=0, results_sd=0, results_720p=0, results_108
 		set_property('mando.scrape.progress_1080p_color', get_setting('mando.scraper_1080p_highlight', 'FFE6B800'))
 		set_property('mando.scrape.progress_720p_color', get_setting('mando.scraper_720p_highlight', 'FF3C9900'))
 		set_property('mando.scrape.progress_sd_color', get_setting('mando.scraper_SD_highlight', 'FF0166FF'))
-		set_property('mando.scrape.progress_total_color', get_setting('mando.scraper_total_highlight', 'FFFFFFFF'))
+		set_property('mando.scrape.progress_total_color', get_setting('mando.scraper_total_highlight', 'FFFF33AE'))
 	else:
 		white = 'FFFFFFFF'
 		set_property('mando.scrape.progress_4k_color', white)
@@ -642,7 +782,32 @@ def kodi_version():
 	return int(get_infolabel('System.BuildVersion')[0:2])
 
 def get_video_database_path():
-	return translate_path('special://profile/Database/MyVideos%s.db' % {19: '119', 20: '121', 21: '124'}[kodi_version()])
+	"""Resolve the live MyVideos DB under the user profile.
+
+	Prefer the newest non-empty MyVideos*.db on disk (matches Kodi's
+	'Running database version MyVideosNNN' log line). Version-number fallbacks
+	are only used if that scan fails — see kodi.wiki/view/Databases.
+	"""
+	import os
+	db_dir = translate_path('special://profile/Database')
+	try:
+		candidates = []
+		for name in os.listdir(db_dir):
+			if not (name.startswith('MyVideos') and name.endswith('.db')): continue
+			path = os.path.join(db_dir, name)
+			try:
+				if os.path.getsize(path) <= 0: continue
+			except Exception:
+				continue
+			candidates.append(path)
+		if candidates:
+			return max(candidates, key=lambda p: (os.path.getmtime(p), os.path.getsize(p)))
+	except Exception:
+		pass
+	# Fallback if the profile Database folder is empty/unreadable.
+	# https://kodi.wiki/view/Databases — v21 Omega = 131, v22 Piers = 146 (subject to change).
+	ver = {19: '119', 20: '121', 21: '131', 22: '146'}.get(kodi_version(), '146')
+	return translate_path('special://profile/Database/MyVideos%s.db' % ver)
 
 def show_busy_dialog():
 	return execute_builtin('ActivateWindow(busydialognocancel)')
@@ -682,6 +847,8 @@ SHUTTING_DOWN_PROP = 'mando.shutting_down'
 PROP_AUTOSCRAPE_TOAST_SHOWN = 'mando.autoscrape_nextep_toast_shown'
 PLAYBACK_WIDGET_REFRESH_PROP = 'mando.playback_widget_refresh_at'
 PLAYBACK_WIDGET_REFRESH_COOLDOWN_SEC = 120
+# Next Episodes / In Progress: skip blocking provider sync this long after Stop (local DB already written).
+PLAYBACK_LIST_SYNC_SKIP_SEC = 30
 BOOT_SYNC_STARTED_PROP = 'mando.boot_sync_started_at'
 BOOT_TRAKT_SYNC_READY_PROP = 'mando.boot_trakt_sync_ready'
 BOOT_SYNC_GATE_TIMEOUT_SEC = 180
@@ -723,10 +890,11 @@ def prepare_service_shutdown():
 	set_property(SHUTTING_DOWN_PROP, 'true')
 	cancel_widget_refresh_alarms()
 
-def schedule_widget_refresh(silent=True, reload_skin=False):
+def schedule_widget_refresh(silent=True, reload_skin=False, defer_browsing=False, delay='00:00:02'):
 	if service_shutting_down(): return
-	url = 'plugin://plugin.video.mando/?mode=refresh_widgets&silent=%s&reload_skin=%s' % ('true' if silent else 'false', 'true' if reload_skin else 'false')
-	execute_builtin('AlarmClock(mando_widget_refresh,RunPlugin(%s),00:00:02,silent)' % url)
+	url = 'plugin://plugin.video.mando/?mode=refresh_widgets&silent=%s&reload_skin=%s&defer_browsing=%s' % (
+		'true' if silent else 'false', 'true' if reload_skin else 'false', 'true' if defer_browsing else 'false')
+	execute_builtin('AlarmClock(mando_widget_refresh,RunPlugin(%s),%s,silent)' % (url, delay))
 
 def mark_playback_widget_refresh():
 	try:
@@ -743,13 +911,35 @@ def playback_widget_refresh_recent():
 	except:
 		return False
 
+def playback_list_sync_skip_recent():
+	"""True shortly after playback wrote local watched/progress — list UIs can paint without a blocking sync."""
+	try:
+		from time import time
+		at = float(get_property(PLAYBACK_WIDGET_REFRESH_PROP) or 0)
+		return at > 0 and (time() - at) < PLAYBACK_LIST_SYNC_SKIP_SEC
+	except:
+		return False
+
 def schedule_playback_widget_refresh():
+	"""Refresh home widgets after playback without reloading the in-addon Videos list.
+
+	UpdateLibrary refreshes the active container too. After Stop from Next Episodes that
+	re-enters build_next_episode; Back during that GetDirectory fails and Kodi dumps to Files.
+	"""
 	if service_shutting_down(): return
 	mark_playback_widget_refresh()
-	schedule_widget_refresh(silent=True)
+	schedule_widget_refresh(silent=True, defer_browsing=True)
 
-def refresh_widgets(silent=False, reload_skin=False):
+def refresh_widgets(silent=False, reload_skin=False, defer_browsing=False):
 	if service_shutting_down(): return
+	# Playback-scheduled refresh: wait until Home (or leave Mando Videos) so we do not
+	# interrupt Next Episodes / In Progress with a second GetDirectory.
+	if defer_browsing:
+		try:
+			if not home() and path_check('plugin.video.mando'):
+				schedule_widget_refresh(silent=silent, reload_skin=reload_skin, defer_browsing=True, delay='00:00:05')
+				return
+		except: pass
 	from caches.settings_cache import get_setting
 	from caches.random_widgets_cache import RandomWidgets
 	from caches.lists_cache import lists_cache
@@ -959,6 +1149,55 @@ def jsonrpc_get_addons(_type, properties=['thumbnail', 'name']):
 	results = get_jsonrpc(command).get('addons')
 	return results
 
+def addons_database_path():
+	database_dir = translate_path('special://database')
+	if database_dir and database_dir[-1] not in ('\\', '/'):
+		database_dir = database_dir + '/'
+	try:
+		_dirs, files = list_dirs(database_dir)
+	except:
+		files = []
+	candidates = [f for f in files if f.lower().startswith('addons') and f.lower().endswith('.db')]
+	if not candidates:
+		return translate_path('special://database/Addons33.db')
+	candidates.sort()
+	return database_dir + candidates[-1]
+
+def addon_available_from_repos(addon_id):
+	if not addon_id: return False
+	if addon_installed(addon_id): return True
+	try:
+		import sqlite3 as database
+		dbcon = database.connect(addons_database_path(), timeout=40.0)
+		row = dbcon.execute(
+			'SELECT 1 FROM addons AS a JOIN addonlinkrepo AS l ON l.idAddon = a.id WHERE a.addonID = ? LIMIT 1',
+			(addon_id,)).fetchone()
+		dbcon.close()
+		return bool(row)
+	except:
+		return _addon_listed_in_repo_directories(addon_id)
+
+def _addon_listed_in_repo_directories(addon_id):
+	try: repos = jsonrpc_get_addons('xbmc.addon.repository') or []
+	except: repos = []
+	addon_id_l = addon_id.lower()
+	for repo in repos:
+		repo_id = repo.get('addonid') or ''
+		if not repo_id: continue
+		for directory in (
+			'addons://%s/' % repo_id,
+			'addons://%s/xbmc.python.module/' % repo_id,
+			'addons://%s/xbmc.python.pluginsource/' % repo_id):
+			command = {'jsonrpc': '2.0', 'id': 1, 'method': 'Files.GetDirectory',
+				'params': {'directory': directory, 'media': 'files', 'properties': ['file']}}
+			try: files = get_jsonrpc(command).get('files') or []
+			except: files = []
+			for item in files:
+				path = (item.get('file') or '').rstrip('/').lower()
+				if path.endswith('/' + addon_id_l) or path.split('/')[-1] == addon_id_l:
+					return True
+	return False
+
 def jsonrpc_get_system_setting(setting_id, setting_value=''):
 	command = {'jsonrpc': '2.0', 'id': 1, 'method': 'Settings.GetSettingValue', 'params': {'setting': setting_id}}
 	try: result = get_jsonrpc(command)['value']
@@ -970,7 +1209,7 @@ def jsonrpc_set_system_setting(setting_id, value):
 	try: return get_jsonrpc(command)
 	except: return None
 
-def open_settings(section=None):
+def open_settings(section=None, panel=None):
 	try:
 		from caches.settings_cache import refresh_settings_manager_properties
 		refresh_settings_manager_properties()
@@ -986,45 +1225,65 @@ def open_settings(section=None):
 		set_property('mando.settings_manager.focus_index', str(section_indexes[focus_key]))
 	else:
 		clear_property('mando.settings_manager.focus_index')
+	if panel:
+		set_property('mando.settings_manager.focus_panel', str(panel))
+	else:
+		clear_property('mando.settings_manager.focus_panel')
 	from windows.base_window import open_window
 	try:
 		open_window(('windows.settings_manager', 'SettingsManager'), 'settings_manager.xml')
 	finally:
 		clear_property('mando.settings_manager.focus_index')
+		clear_property('mando.settings_manager.focus_panel')
+
+def _open_addon_settings(addon_id):
+	if not addon_id or addon_id in ('empty_setting', ''): return False
+	try:
+		addon(addon_id).openSettings()
+		return True
+	except:
+		try:
+			execute_builtin('Addon.OpenSettings(%s)' % addon_id, True)
+			return True
+		except:
+			return False
 
 def external_scraper_settings(params=None):
 	try:
 		import json
 		from modules import settings
 		params = params or {}
+		return_to_settings = str(params.get('return_to', '')).lower() in ('settings', 'torrent', '1', 'true')
 		slot = None
 		if params.get('slot') not in (None, ''):
 			try: slot = int(params.get('slot'))
 			except: slot = None
+		if return_to_settings:
+			close_all_dialog()
+			sleep(150)
 		slots = settings.configured_external_scraper_slots()
+		opened = False
 		if not slots:
 			external = get_property('mando.external_scraper.module')
-			if external in ('empty_setting', ''): return
-			execute_builtin('Addon.OpenSettings(%s)' % external)
-			return
-		if slot is None:
-			if len(slots) == 1:
-				slot = slots[0]['slot']
-			else:
-				list_items = []
-				for entry in slots:
-					line2 = 'Slot %d' % entry['slot']
-					if not entry['enabled']: line2 = '%s (disabled)' % line2
-					list_items.append({'line1': entry['display_name'], 'line2': line2})
-				kwargs = {'items': json.dumps(list_items), 'heading': 'External Scraper Settings', 'multi_line': 'true'}
-				choice = select_dialog(slots, **kwargs)
-				if choice is None: return
-				execute_builtin('Addon.OpenSettings(%s)' % choice['module_id'])
+			opened = _open_addon_settings(external)
+		elif slot is None and len(slots) != 1:
+			list_items = []
+			for entry in slots:
+				line2 = 'Slot %d' % entry['slot']
+				if not entry['enabled']: line2 = '%s (disabled)' % line2
+				list_items.append({'line1': entry['display_name'], 'line2': line2})
+			kwargs = {'items': json.dumps(list_items), 'heading': 'External Scraper Settings', 'multi_line': 'true'}
+			choice = select_dialog(slots, **kwargs)
+			if choice is None:
+				if return_to_settings: open_settings('torrent', panel=2100)
 				return
-		data = settings.external_scraper_slot_data(slot)
-		external = data['module']
-		if external in ('empty_setting', ''): return
-		execute_builtin('Addon.OpenSettings(%s)' % external)
+			opened = _open_addon_settings(choice['module_id'])
+		else:
+			if slot is None: slot = slots[0]['slot']
+			data = settings.external_scraper_slot_data(slot)
+			opened = _open_addon_settings(data['module'])
+		if return_to_settings and opened:
+			open_settings('torrent', panel=2100)
 	except: pass
 
 def progress_dialog(heading='', icon=None):
@@ -1047,10 +1306,32 @@ def close_progress_dialog(progress):
 		progress.close()
 	except: pass
 
+def sleep_while_authorising(progress, seconds):
+	"""Sleep up to `seconds`. True if the auth window was closed/cancelled or Kodi is aborting."""
+	try: total_ms = int(max(0, float(seconds)) * 1000)
+	except: total_ms = 0
+	mon = kodi_monitor()
+	elapsed, step = 0, 200
+	while elapsed < total_ms:
+		try:
+			if progress is not None and progress.iscanceled(): return True
+		except: return True
+		if mon and mon.abortRequested(): return True
+		chunk = min(step, total_ms - elapsed)
+		sleep(chunk)
+		elapsed += chunk
+	try: return bool(progress is not None and progress.iscanceled())
+	except: return True
+
 def select_dialog(function_list, **kwargs):
 	from windows.base_window import open_window
+	alt_function_list = kwargs.pop('alt_function_list', None)
 	selection = open_window(('windows.default_dialogs', 'Select'), 'select.xml', **kwargs)
 	if selection in (None, []): return selection
+	if isinstance(selection, dict) and selection.get('alt'):
+		if not alt_function_list: return None
+		try: return alt_function_list[selection['index']]
+		except: return None
 	if kwargs.get('multi_choice', 'false') == 'true': return [function_list[i] for i in selection]
 	return function_list[selection]
 
@@ -1082,11 +1363,15 @@ def confirm_dialog(heading='', text='Are you sure?', ok_label='OK', cancel_label
 def ok_dialog(heading='', text='No Results', ok_label='OK', scroll=False):
 	from windows.base_window import open_window
 	needs_scroll = scroll and _dialog_needs_scroll(text)
+	# Match confirm_dialog: long text focuses the scrollbar so Up/Down scrolls immediately;
+	# Left/Right (and Down past the end) still reach OK.
 	kwargs = {'heading': heading, 'text': text, 'ok_label': ok_label,
-				'scroll': 'true' if needs_scroll else 'false', 'scroll_focus': 'true' if needs_scroll else 'false'}
+				'scroll': 'true' if needs_scroll else 'false',
+				'scroll_focus': 'true' if needs_scroll else 'false'}
 	return open_window(('windows.default_dialogs', 'OK'), 'ok.xml', **kwargs)
 
 def show_text(heading, text=None, file=None, font_size='small', kodi_log=False):
+	import re
 	from windows.base_window import open_window
 	heading = heading.replace('[B]', '').replace('[/B]', '')
 	if file:
@@ -1095,10 +1380,141 @@ def show_text(heading, text=None, file=None, font_size='small', kodi_log=False):
 		confirm = confirm_dialog(text='Show Log Errors Only?', ok_label='Yes', cancel_label='No')
 		if confirm == None: return
 		if confirm: text = [i for i in text if any(x in i.lower() for x in ('exception', 'error', '[test]'))]
-	text = ''.join(text)
-	return open_window(('windows.textviewer', 'TextViewer'), 'textviewer.xml', heading=heading, text=text, font_size=font_size)
+	if isinstance(text, str):
+		# Callers often use Kodi [CR] as a line break (e.g. Clean Databases). Treat like \n
+		# before wrap — otherwise one giant line hard-splits mid-[COLOR]/[B] and shows orphan tags.
+		text = text.replace('[CR]', '\n').splitlines()
+	# List labels do not wrap; overflow becomes "...". Wrap by estimated pixel width for
+	# Estuary NotoSans (font14/33 large, font12/25 small). Label is 1214px; keep a small
+	# margin so dense/proportional lines are not truncated mid-word.
+	bbcode_re = re.compile(r'\[/?[^\[\]]+\]')
+	# Keep spaces inside [B]/[I]/[COLOR] spans so wrap cannot split e.g. [I]Original Air Date[/I].
+	# COLOR tags may be "[COLOR green]" or "[COLOR=green]" / "[COLOR ff00ff00]".
+	bbcode_span_re = re.compile(
+		r'\[(B|I|LIGHT|UPPERCASE|LOWERCASE|CAPITALIZE)\](?:(?!\[/\1\]).)*\[/\1\]'
+		r'|\[COLOR(?:\s|=)[^\]]+\].*?\[/COLOR\]',
+		re.I | re.DOTALL
+	)
+	bbcode_tag_re = re.compile(r'\[(/?)([^\]]+)\]')
+	nbsp = '\u00a0'
+	# ASCII 32-126 advance widths (rounded) for NotoSans-Regular at the active size.
+	if str(font_size).lower() == 'large':
+		char_widths = (9, 9, 13, 21, 19, 27, 24, 7, 10, 10, 18, 19, 9, 11, 9, 12, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 9, 9, 19, 19, 19, 14, 30, 21, 21, 21, 24, 18, 17, 24, 24, 11, 9, 20, 17, 30, 25, 26, 20, 26, 21, 18, 18, 24, 20, 31, 19, 19, 19, 11, 12, 11, 19, 15, 9, 19, 20, 16, 20, 19, 11, 20, 20, 9, 9, 18, 9, 31, 20, 20, 20, 20, 14, 16, 12, 20, 17, 26, 17, 17, 16, 13, 18, 13, 19)
+		extra_widths = {'\u2014': 33, '\u2013': 17, '\u2026': 26, '\u2019': 6, '\u2018': 6, '\u201c': 12, '\u201d': 12, '\u00b7': 9, nbsp: 9}
+		default_width, max_px = 19, 1190
+	else:
+		char_widths = (7, 7, 10, 16, 14, 21, 18, 6, 8, 8, 14, 14, 7, 8, 7, 9, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 7, 7, 14, 14, 14, 11, 22, 16, 16, 16, 18, 14, 13, 18, 19, 8, 7, 15, 13, 23, 19, 20, 15, 20, 16, 14, 14, 18, 15, 23, 15, 14, 14, 8, 9, 8, 14, 11, 7, 14, 15, 12, 15, 14, 9, 15, 15, 6, 6, 13, 6, 23, 15, 15, 15, 15, 10, 12, 9, 15, 13, 20, 13, 13, 12, 10, 14, 10, 14)
+		extra_widths = {'\u2014': 25, '\u2013': 13, '\u2026': 20, '\u2019': 4, '\u2018': 4, '\u201c': 9, '\u201d': 9, '\u00b7': 7, nbsp: 7}
+		default_width, max_px = 14, 1190
+
+	def _text_width(value):
+		total = 0
+		for char in bbcode_re.sub('', value).replace(nbsp, ' '):
+			code = ord(char)
+			if 32 <= code <= 126:
+				total += char_widths[code - 32]
+			else:
+				total += extra_widths.get(char, default_width)
+		return total
+
+	def _protect_bbcode_spaces(value):
+		return bbcode_span_re.sub(lambda m: m.group(0).replace(' ', nbsp), value)
+
+	def _tag_base(name):
+		# Protect turns "[COLOR magenta]" into nbsp; split on ' ' alone would miss [/COLOR].
+		name = name.replace(nbsp, ' ')
+		return name.split(' ', 1)[0].split('=', 1)[0].upper()
+
+	def _tag_stack_delta(stack, value):
+		for match in bbcode_tag_re.finditer(value):
+			closing, name = match.group(1), match.group(2)
+			base = _tag_base(name)
+			if closing:
+				for idx in range(len(stack) - 1, -1, -1):
+					if _tag_base(stack[idx]) == base:
+						del stack[idx]
+						break
+			else:
+				stack.append(name.replace(nbsp, ' '))
+
+	def _open_tags(stack):
+		return ''.join('[%s]' % name.replace(nbsp, ' ') for name in stack)
+
+	def _close_tags(stack):
+		return ''.join('[/%s]' % _tag_base(name) for name in reversed(stack))
+
+	def _balance_bbcode(parts):
+		# Close open markup at each line end and reopen on the next so a wrap cannot leave
+		# orphan tags like [I]Original / Air Date[/I] (which Kodi then fails to italicise).
+		stack, balanced = [], []
+		for part in parts:
+			prefix = _open_tags(stack)
+			_tag_stack_delta(stack, part)
+			balanced.append((prefix + part + _close_tags(stack)).replace(nbsp, ' '))
+		return balanced
+
+	def _wrap_line(value, width):
+		value = _protect_bbcode_spaces(value)
+		if _text_width(value) <= width:
+			return [value.replace(nbsp, ' ')]
+		parts, current = [], ''
+		for word in value.split(' '):
+			candidate = word if not current else '%s %s' % (current, word)
+			if current and _text_width(candidate) > width:
+				parts.append(current)
+				current = word
+				while _text_width(current) > width:
+					# Hard-split oversized tokens (URLs, long unbroken strings).
+					# Never cut inside a [...] BBCode tag — that yields orphan "[COLOR green]" lines.
+					cut, idx = current, 1
+					while idx < len(cut) and _text_width(cut[:idx]) <= width:
+						idx += 1
+					idx = max(1, idx - 1)
+					open_bracket = cut.rfind('[', 0, idx)
+					close_bracket = cut.rfind(']', 0, idx)
+					if open_bracket > close_bracket:
+						# Mid-tag: finish the tag if present, else back up before '['.
+						tag_end = cut.find(']', open_bracket)
+						if tag_end != -1 and _text_width(cut[:tag_end + 1]) <= width:
+							idx = tag_end + 1
+						elif open_bracket > 0:
+							idx = open_bracket
+					parts.append(cut[:idx])
+					current = cut[idx:]
+			else:
+				current = candidate
+		if current:
+			parts.append(current)
+		return _balance_bbcode(parts or [value])
+
+	processed_lines = []
+	for line in text:
+		clean_line = line.rstrip('\r\n')
+		processed_lines.extend(_wrap_line(clean_line, max_px))
+	return open_window(('windows.textviewer', 'TextViewer'), 'textviewer.xml', heading=heading, text=processed_lines, font_size=font_size)
 
 LIST_ITEM_NOT_IN_LIST = 'Item not in list'
+LIST_ITEM_ALREADY_IN_LIST = 'Already In List'
+LIST_CREATE_CANCELLED = 'List Creation Cancelled'
+LIST_CREATE_ERROR = 'Error Creating List'
+
+def notify_success(settle_ms=0):
+	notification('Success', 3000, settle_ms=settle_ms)
+
+def notify_error(settle_ms=0):
+	notification('Error', 3000, settle_ms=settle_ms)
+
+def notify_already_in_list():
+	notification(LIST_ITEM_ALREADY_IN_LIST, 3000)
+
+def notify_not_in_list(settle_ms=0):
+	notification(LIST_ITEM_NOT_IN_LIST, 3000, settle_ms=settle_ms)
+
+def notify_added_to(name=None):
+	notification('Added to %s' % name if name else 'Success', 3000)
+
+def notify_removed_from(name=None):
+	notification('Removed from %s' % name if name else 'Success', 3000)
 
 def notification(line1, time=5000, icon=None, settle_ms=0):
 	# Brief delay helps Kodi show the toast after select/confirm dialogs close (rapid calls can drop it otherwise).
@@ -1145,28 +1561,59 @@ def focus_index(index):
 	try: current_window.getControl(focus_id).selectItem(index)
 	except: pass
 
-def get_all_icons():
-	import requests
-	from caches.main_cache import cache_object
-	username, location = media_github_credentials()
-	def _process(dummy):
-		try:
-			results = requests.get('https://api.github.com/repos/%s/%s/contents/packages/media/icons' % (username, location))
-			results = [i['name'].replace('.png', '') for i in results.json()]
-			return results
-		except: return ['folder']
-	return cache_object(_process, 'all_icons', 'foo', False, 168)
+def _icon_names_from_payload(data):
+	if not isinstance(data, list) or not data:
+		return None
+	names = []
+	for item in data:
+		if isinstance(item, str):
+			name = item
+		elif isinstance(item, dict):
+			name = item.get('name') or ''
+		else:
+			continue
+		name = os.path.splitext(str(name).strip())[0]
+		if name:
+			names.append(name)
+	return names or None
 
-def get_all_addon_icons():
+def _fetch_remote_icon_names(base, timeout=4):
 	import requests
-	from caches.main_cache import cache_object
-	username, location = media_github_credentials()
-	def _process(dummy):
-		try:
-			results = requests.get('https://api.github.com/repos/%s/%s/contents/packages/addon_icons' % (username, location))
-			return results.json()
-		except: return []
-	return cache_object(_process, 'all_addon_icons', 'foo', True, 168)
+	try:
+		response = requests.get('%s/icons.json' % base, timeout=timeout)
+		if response.status_code != 200:
+			return None
+		text = response.text.lstrip()
+		if not (text.startswith('[') or text.startswith('{')):
+			return None
+		return _icon_names_from_payload(response.json())
+	except:
+		return None
+
+def get_all_icons():
+	from caches.main_cache import main_cache
+	cached = main_cache.get('all_icons_remote')
+	if cached is not None:
+		return cached
+	base = media_remote_base()
+	cached = main_cache.get('all_icons_remote')
+	if cached is not None:
+		return cached
+	names = _fetch_remote_icon_names(base, timeout=8)
+	if not names:
+		for candidate in _MEDIA_REMOTE_BASES:
+			if candidate == base:
+				continue
+			names = _fetch_remote_icon_names(candidate, timeout=8)
+			if names:
+				set_property(_MEDIA_BASE_PROPERTY, candidate)
+				try: main_cache.set('media_remote_base', candidate, expiration=1)
+				except: pass
+				break
+	if names:
+		main_cache.set('all_icons_remote', names, expiration=168)
+		return names
+	return []
 
 def upload_logfile(params):
 	import json

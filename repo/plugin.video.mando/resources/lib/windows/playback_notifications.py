@@ -32,12 +32,20 @@ class NextEpisode(BaseDialog):
 		BaseDialog.__init__(self, *args)
 		self.closed = False
 		self.meta = kwargs.get('meta')
-		self.selected = kwargs.get('default_action', 'cancel')
+		self.default_action = kwargs.get('default_action', 'cancel')
+		self.selected = self.default_action
 		self.set_properties()
 
 	def onInit(self):
+		# Buttons: 10 Close | 11 Play | 12 Cancel
 		focus_map = {'play': 11, 'cancel': 12, 'pause': 10, 'close': 10}
 		self.setFocusId(focus_map.get(self.selected, 12))
+		try:
+			from modules.kodi_utils import logger
+			logger('Mando', 'Next episode alert open: default=%s focus=%s (back=close)' % (
+				self.default_action, focus_map.get(self.selected, 12)))
+		except:
+			pass
 		Thread(target=self.monitor, daemon=True).start()
 
 	def run(self):
@@ -50,12 +58,25 @@ class NextEpisode(BaseDialog):
 
 	def onAction(self, action):
 		if action in self.closing_actions:
+			# Back/Escape = Close (dismiss; play next when episode ends). Cancel is the abort button.
 			self.selected = 'close'
+			try:
+				from modules.kodi_utils import logger
+				logger('Mando', 'Next episode alert dismiss: action=%s -> close (default=%s)' % (
+					action, self.default_action))
+			except:
+				pass
 			self.closed = True
 			self.close()
 
 	def onClick(self, controlID):
 		self.selected = {10: 'close', 11: 'play', 12: 'cancel'}[controlID]
+		try:
+			from modules.kodi_utils import logger
+			logger('Mando', 'Next episode alert button: id=%s -> %s (default=%s)' % (
+				controlID, self.selected, self.default_action))
+		except:
+			pass
 		self.closed = True
 		self.close()
 
@@ -77,7 +98,7 @@ class NextEpisode(BaseDialog):
 		return '%d:%02d' % (mins, secs)
 
 	def get_thumb(self):
-		if avoid_episode_spoilers() and int(self.meta.get('playcount', '0')) == 0: thumb = self.meta.get('fanart', '') or addon_fanart()
+		if avoid_episode_spoilers() and int(self.meta.get('playcount') or 0) == 0: thumb = self.meta.get('fanart', '') or addon_fanart()
 		else: thumb = self.meta.get('ep_thumb', None) or self.meta.get('fanart', '') or addon_fanart()
 		return thumb
 
@@ -164,7 +185,7 @@ class StillWatching(BaseDialog):
 		landscape, fanart, clearlogo = self.meta.get('landscape', ''), self.meta.get('fanart', ''), self.meta.get('clearlogo', '')
 		self.setProperty('mode', 'autoscrape_confirm' if self.compact_confirm else 'still_watching')
 		if self.compact_confirm:
-			if avoid_episode_spoilers() and int(self.meta.get('playcount', '0')) == 0:
+			if avoid_episode_spoilers() and int(self.meta.get('playcount') or 0) == 0:
 				thumb = fanart or addon_fanart()
 			else:
 				thumb = self.meta.get('ep_thumb') or fanart or addon_fanart()
@@ -208,15 +229,48 @@ class IntroSkipPrompt(BaseDialog):
 		except: self.countdown_sec = 15
 		self.set_properties()
 
+	def _log_intro_prompt(self, message):
+		try:
+			from modules.kodi_utils import logger
+			logger('Mando', 'Intro skip prompt: %s' % message)
+		except:
+			pass
+
 	def onInit(self):
-		self.setFocusId(10)
+		# Re-apply after XML load — Window.Property(mode) from __init__ can be empty on some Android builds,
+		# which hides the Skip Intro heading/buttons (only dim + thumb remain).
+		self.set_properties()
+		try:
+			self.setFocusId(10)
+		except Exception as exc:
+			self._log_intro_prompt('setFocusId failed: %s' % exc)
+		mode = ''
+		focus_id = -1
+		try: mode = self.getProperty('mode') or ''
+		except: pass
+		try: focus_id = self.getFocusId()
+		except: pass
+		fs = False
+		playing = False
+		try: fs = bool(get_visibility('Window.IsActive(fullscreenvideo)'))
+		except: pass
+		try:
+			playing = bool(self.player.isPlayingVideo() or self.player.isPlaying())
+		except: pass
+		self._log_intro_prompt('onInit mode=%r focus=%s fullscreenvideo=%s playing=%s countdown=%ss' % (
+			mode, focus_id, fs, playing, self.countdown_sec))
 		Thread(target=self.monitor, daemon=True).start()
 
 	def run(self):
+		self._log_intro_prompt('doModal begin')
 		self.doModal()
+		self._log_intro_prompt('doModal end timed_out=%s selected=%s' % (self.timed_out, self.selected))
 		self.clearProperties()
 		player = getattr(self, 'player', None)
 		self.clear_modals()
+		# Always restore on close. Yes still waits 250ms then seeks once —
+		# ActivateWindow must not share a tick with seekTime (#220). Restoring
+		# here (before that wait) avoids a second fullscreen assert during the seek.
 		_restore_fullscreen_playback(player)
 		if self.timed_out:
 			return None
@@ -236,7 +290,7 @@ class IntroSkipPrompt(BaseDialog):
 	def set_properties(self):
 		fanart, clearlogo = self.meta.get('fanart', ''), self.meta.get('clearlogo', '')
 		self.setProperty('mode', 'skip_intro')
-		if avoid_episode_spoilers() and int(self.meta.get('playcount', '0')) == 0:
+		if avoid_episode_spoilers() and int(self.meta.get('playcount') or 0) == 0:
 			thumb = fanart or addon_fanart()
 		else:
 			thumb = self.meta.get('ep_thumb') or fanart or addon_fanart()

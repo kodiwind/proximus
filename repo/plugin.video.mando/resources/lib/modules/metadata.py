@@ -8,6 +8,23 @@ from modules.utils import jsondate_to_datetime, subtract_dates
 
 _ID_EMPTY = (None, '', 'None', 'empty_setting', 0, '0')
 
+def _apply_fanarttv(media_type, tmdb_id, imdb_id, tvdb_id, poster, fanart, landscape, clearlogo):
+	"""TMDb first. Fanart.tv only fills slots that are still empty. No-op without a personal key."""
+	if poster and fanart and landscape and clearlogo: return poster, fanart, landscape, clearlogo
+	try:
+		from modules.settings import fanarttv_api_key
+		api_key = fanarttv_api_key()
+		if api_key in _ID_EMPTY: return poster, fanart, landscape, clearlogo
+		from apis.fanarttv_api import artwork_fallback
+		extra = artwork_fallback(media_type, api_key, tmdb_id=tmdb_id, imdb_id=imdb_id, tvdb_id=tvdb_id)
+		if extra:
+			if not poster: poster = extra.get('poster') or ''
+			if not fanart: fanart = extra.get('fanart') or ''
+			if not landscape: landscape = extra.get('landscape') or ''
+			if not clearlogo: clearlogo = extra.get('clearlogo') or ''
+	except: pass
+	return poster, fanart, landscape, clearlogo
+
 def _media_id_candidates(id_type, media_id, keys=('tmdb', 'imdb', 'tvdb')):
 	"""Ordered (id_type, id) lookups for trakt_dict maps. Prefer TMDb, then IMDb/TVDb."""
 	key_map = {'tmdb': 'tmdb_id', 'imdb': 'imdb_id', 'tvdb': 'tvdb_id'}
@@ -82,6 +99,10 @@ def movie_meta(id_type, media_id, api_key, mpaa_region, current_date, current_ti
 			if not poster: poster = next((tmdb_image_url % ('w780', i['file_path']) for i in images['posters'] if i['iso_639_1'] == 'en'), '')
 			if not fanart: fanart = next((tmdb_image_url % ('w1280', i['file_path']) for i in images['backdrops'] if i['iso_639_1'] in (None, 'xx')), '')
 		else: clearlogo, landscape = '', ''
+		poster, fanart, landscape, clearlogo = _apply_fanarttv('movie', tmdb_id, imdb_id, None, poster, fanart, landscape, clearlogo)
+		# LandscapeInfo binds Art(landscape). Newer/lesser titles often have backdrop_path (fanart)
+		# but no extra English-tagged backdrop — reuse fanart so the slot is not blank.
+		if not landscape: landscape = fanart
 		title, original_title = data_get('title'), data_get('original_title')
 		try:
 			translations = data_get('translations')['translations']
@@ -228,6 +249,8 @@ def tvshow_meta(id_type, media_id, api_key, mpaa_region, current_date, current_t
 			if not poster: poster = next((tmdb_image_url % ('w780', i['file_path']) for i in images['posters'] if i['iso_639_1'] == 'en'), '')
 			if not fanart: fanart = next((tmdb_image_url % ('w1280', i['file_path']) for i in images['backdrops'] if i['iso_639_1'] == 'xx'), '')
 		else: clearlogo, landscape = '', ''
+		poster, fanart, landscape, clearlogo = _apply_fanarttv('tvshow', tmdb_id, imdb_id, tvdb_id, poster, fanart, landscape, clearlogo)
+		if not landscape: landscape = fanart
 		title, original_title = data_get('name'), data_get('original_name')
 		try:
 			translations = data_get('translations')['translations']
@@ -443,6 +466,26 @@ def episode_groups(media_id):
 	try: groups = episode_groups_data(media_id)['results']
 	except: groups = None
 	return groups or None
+
+def preferred_episode_group(groups, prefer_name=None):
+	"""Pick one TMDb episode group for Auto/fallback scrape remaps.
+
+	Order: optional exact name (e.g. anime "Seasons") → Original Air Date (type 1)
+	→ first group. Absolute and other types are not preferred.
+	"""
+	if not groups:
+		return None
+	if prefer_name:
+		named = next((g for g in groups if (g.get('name') or '').lower() == prefer_name.lower()), None)
+		if named:
+			return named
+	def _type(group):
+		try: return int(group.get('type'))
+		except: return 0
+	aired = next((g for g in groups if _type(g) == 1), None)
+	if aired:
+		return aired
+	return groups[0]
 
 def group_details(group_id):
 	return episode_group_details(group_id)

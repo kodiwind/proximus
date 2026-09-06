@@ -7,7 +7,7 @@ from caches.external_cache import external_cache
 from caches.settings_cache import get_setting
 from modules import kodi_utils, source_utils
 from modules.debrid import RD_check, AD_check, OC_check, TB_check, PM_check, query_local_cache
-from modules.settings import debrid_cache_check, max_threads
+from modules.settings import debrid_cache_check, debrid_cache_check_supported, max_threads
 from modules.utils import clean_file_name
 # logger = kodi_utils.logger
 
@@ -21,14 +21,20 @@ _INTERNAL_PROGRESS_LABELS = {
 	'oc_cloud': 'OC Cloud',
 	'tb_cloud': 'TB Cloud',
 	'folders': 'Folders',
+	'comet': 'Comet',
+	'torrentio': 'Torrentio',
+	'torz': 'StremThru Torz',
+	'nyaa': 'Nyaa (Anime)',
+	'animetosho': 'AnimeTosho (Anime)',
 }
 
 class source:
-	def __init__(self, meta, source_dict, active_debrid, cache_check_override, internal_scrapers, prescrape_sources, progress_dialog, disabled_ext_ignored=False, cloud_scrapers=None, external_orchestration=None):
+	def __init__(self, meta, source_dict, active_debrid, cache_check_override, internal_scrapers, prescrape_sources, progress_dialog, disabled_ext_ignored=False, cloud_scrapers=None, external_orchestration=None, defer_cache_check=False):
 		self.monitor = kodi_utils.kodi_monitor()
 		self.scrape_provider = 'external'
 		self.progress_dialog = progress_dialog
 		self.cache_check_override = cache_check_override
+		self.defer_cache_check = defer_cache_check
 		self.meta = meta
 		self.background = self.meta.get('background', False)
 		self.active_debrid = active_debrid
@@ -394,34 +400,96 @@ class source:
 						else: yield provider
 				except: yield provider
 		final_lock = Lock()
+		frozen_providers = set()
 		def _debrid_api_check_enabled(provider):
+			if not debrid_cache_check_supported(provider):
+				return False
 			if self.cache_check_override is not None:
 				return self.cache_check_override
 			return debrid_cache_check(provider)
+		def _is_unchecked_row(item):
+			return str(item.get('cache_provider', '')).startswith('Unchecked ')
+		def _providers_with_rows():
+			return set(i.get('debrid') for i in final_results if i.get('debrid'))
+		def _unchecked_batch(provider, reason):
+			if not self.background:
+				self.process_quality_count_final(results)
+			batch = [dict(i, **{'cache_provider': 'Unchecked %s' % provider, 'debrid': provider}) for i in results]
+			try:
+				kodi_utils.logger('DebridCacheCheck', 'fallback=unchecked provider=%s reason=%s total=%d' % (provider, reason, len(batch)))
+			except: pass
+			return batch
+		def _commit_cache_batch(provider, batch):
+			with final_lock:
+				if provider in frozen_providers:
+					return
+				existing = [i for i in final_results if i.get('debrid') == provider]
+				if existing:
+					existing_unverified = all(_is_unchecked_row(i) for i in existing)
+					new_verified = batch and not all(_is_unchecked_row(i) for i in batch)
+					if existing_unverified and new_verified:
+						final_results[:] = [i for i in final_results if i.get('debrid') != provider]
+						final_results.extend(batch)
+					return
+				final_results.extend(batch)
 		def _process_cache_check(provider, function):
-			if _debrid_api_check_enabled(provider):
-				if provider in ('Real-Debrid', 'AllDebrid'):
-					cached = function(hash_list, cached_hashes, self.data, self.active_debrid)
+			incomplete, cached = False, []
+			try:
+				if _debrid_api_check_enabled(provider):
+					if provider in ('Real-Debrid', 'AllDebrid'):
+						cached = function(hash_list, cached_hashes, self.data, self.active_debrid)
+					else:
+						cached = function(hash_list, cached_hashes)
+					if cached is None:
+						incomplete = True
+						cached = []
 				else:
-					cached = function(hash_list, cached_hashes)
-			else:
-				cached = hash_list
-			api_blocked = kodi_utils.get_property('mando.debrid_cache_api_error')
+					cached = hash_list
+			except Exception as e:
+				incomplete = True
+				cached = []
+				try:
+					kodi_utils.logger('DebridCacheCheck', 'provider=%s thread=%s' % (provider, type(e).__name__))
+				except: pass
+			api_blocked = kodi_utils.get_property('mando.debrid_cache_api_error') if provider == 'AllDebrid' else ''
 			if api_blocked:
 				if not self.background:
-					self.process_quality_count_final(results)
 					kodi_utils.notification('AllDebrid cache check unavailable (%s). Showing unchecked sources.' % api_blocked, 6000)
 					kodi_utils.clear_property('mando.debrid_cache_api_error')
-				batch = [dict(i, **{'cache_provider': provider, 'debrid': provider}) for i in results]
-				try:
-					kodi_utils.logger('DebridCacheCheck', 'fallback=unchecked provider=%s reason=%s total=%d' % (provider, api_blocked, len(batch)))
-				except: pass
+				batch = _unchecked_batch(provider, api_blocked)
+			elif incomplete:
+				batch = _unchecked_batch(provider, 'incomplete_check')
 			else:
 				cached_set = set(str(i).lower() for i in cached)
 				if not self.background: self.process_quality_count_final([i for i in results if i.get('hash', '').lower() in cached_set])
 				batch = [dict(i, **{'cache_provider': provider if i.get('hash', '').lower() in cached_set else 'Uncached %s' % provider, 'debrid': provider}) for i in results]
+			_commit_cache_batch(provider, batch)
+		def _apply_missing_provider_fallback(providers_needing_api):
 			with final_lock:
-				final_results.extend(batch)
+				missing_providers = [p for p in providers_needing_api if p not in _providers_with_rows()]
+			if not missing_providers:
+				with final_lock:
+					frozen_providers.update(providers_needing_api)
+				return
+			unchecked_batches = [(provider, _unchecked_batch(provider, 'incomplete_check')) for provider in missing_providers]
+			with final_lock:
+				for provider, batch in unchecked_batches:
+					if provider in _providers_with_rows():
+						continue
+					final_results.extend(batch)
+				verified = set(i.get('debrid') for i in final_results if i.get('debrid') and not _is_unchecked_row(i))
+				if verified:
+					final_results[:] = [i for i in final_results if not (
+						i.get('debrid') in verified and _is_unchecked_row(i))]
+			with final_lock:
+				frozen_providers.update(providers_needing_api)
+				still_unchecked = [p for p in providers_needing_api if p in set(
+					i.get('debrid') for i in final_results if _is_unchecked_row(i))]
+			try:
+				if still_unchecked:
+					kodi_utils.logger('DebridCacheCheck', 'warning=incomplete_check fallback=unchecked providers=%s hashes=%d' % (
+						','.join(still_unchecked), len(hash_list)))
+			except: pass
 		def _debrid_check_dialog(debrid_deadline):
 			# Do not clear a user Back/cancel from the scrape phase — that made cancel
 			# look ignored while cache-check continued and could reopen progress UI.
@@ -443,15 +511,23 @@ class source:
 				except: pass
 		def _log_debrid_cache_summary(final_results, providers_needing_api):
 			try:
-				uncached = sum(1 for i in final_results if 'Uncached' in i.get('cache_provider', ''))
-				cached = len(final_results) - uncached
-				kodi_utils.logger('DebridCacheCheck', 'enabled=%s providers=%s total=%d cached=%d uncached=%d' % (
-					bool(providers_needing_api), ','.join(providers_needing_api) or 'none', len(final_results), cached, uncached))
+				uncached = sum(1 for i in final_results if str(i.get('cache_provider', '')).startswith('Uncached '))
+				unchecked = sum(1 for i in final_results if str(i.get('cache_provider', '')).startswith('Unchecked '))
+				cached = len(final_results) - uncached - unchecked
+				kodi_utils.logger('DebridCacheCheck', 'enabled=%s providers=%s total=%d cached=%d uncached=%d unchecked=%d' % (
+					bool(providers_needing_api), ','.join(providers_needing_api) or 'none', len(final_results), cached, uncached, unchecked))
 			except: pass
 		try:
+			results = list(_process_duplicates(results))
+			if self.defer_cache_check:
+				for i in results:
+					try:
+						if i.get('hash'):
+							i['hash'] = str(i['hash']).lower()
+					except: pass
+				return results
 			if not self.background and self.all_internal_sources: self.process_quality_count_final(self.all_internal_sources)
 			final_results = []
-			results = list(_process_duplicates(results))
 			hash_list = list(set([i['hash'].lower() for i in results if i.get('hash') and len(i['hash']) == 40]))
 			cached_hashes = query_local_cache(hash_list)
 			providers_needing_api = [p for p in self.active_debrid if _debrid_api_check_enabled(p)]
@@ -486,15 +562,11 @@ class source:
 					_debrid_check_dialog(debrid_deadline)
 					for thread in debrid_check_threads:
 						thread.join(timeout=max(0.0, debrid_deadline - time.time()))
-			if providers_needing_api and not final_results:
-				for provider in providers_needing_api:
-					if not self.background:
-						self.process_quality_count_final(results)
-					final_results.extend([dict(i, **{'cache_provider': 'Uncached %s' % provider, 'debrid': provider}) for i in results])
-				try:
-					kodi_utils.logger('DebridCacheCheck', 'warning=incomplete_check fallback=uncached providers=%s hashes=%d' % (
-						','.join(providers_needing_api), len(hash_list)))
-				except: pass
+			grace_deadline = time.time() + 2.0
+			for thread in debrid_check_threads:
+				if thread.is_alive():
+					thread.join(timeout=max(0.0, grace_deadline - time.time()))
+			_apply_missing_provider_fallback(providers_needing_api)
 			_log_debrid_cache_summary(final_results, providers_needing_api)
 			return final_results
 		except: return []

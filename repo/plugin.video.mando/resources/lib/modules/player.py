@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
+import sys
 import xbmc
+import xbmcplugin
 import json
 import time
 from threading import Thread
@@ -31,10 +33,10 @@ _INTRO_SKIP_EARLY_START_SEC = 120
 _INTRO_SKIP_SETTLE_SEC = 4
 _INTRO_SKIP_SETTLE_MAX_WAIT_SEC = 12
 _INTRO_SKIP_SETTLE_JUMP_SEC = 20
-_INTRO_CHAPTER_MIN_START_SEC = 5
 _INTRO_CHAPTER_MIN_SEGMENT_SEC = 10
 _INTRO_CHAPTER_MIN_END_SEC = 15
 _INTRO_SKIP_POST_END_GRACE_SEC = 20
+_INTRO_SKIP_SEEK_SETTLE_MS = 250
 
 class MandoPlayer(xbmc.Player):
 	def __init__ (self):
@@ -44,6 +46,36 @@ class MandoPlayer(xbmc.Player):
 		if not self.is_generic and (self.sources_object._resolve_user_cancelled or self.sources_object.cancel_all_playback):
 			return True
 		return ku.get_property(PROP_RESOLVE_CANCEL) == 'true'
+
+	def _autoscrape_handoff_ready(self):
+		# Toast is only the last alert window. Confirm + finished scrape already
+		# arms Ready (PROP set) — Stop then is a handoff, not "stopped early".
+		try:
+			if ku.get_property(ku.PROP_AUTOSCRAPE_TOAST_SHOWN) == 'true':
+				return True
+			ready = ku.get_property(PROP_AUTOSCRAPE_NEXTEP_READY)
+			return bool(ready) and ready != 'false'
+		except Exception:
+			return False
+
+	def _maybe_show_nextep_handoff_cover(self):
+		if not getattr(self, 'autoscrape_nextep', False):
+			return
+		if not self._autoscrape_handoff_ready():
+			return
+		try:
+			from modules.sources import nextep_handoff_cancelled, show_nextep_handoff_cover
+			if nextep_handoff_cancelled():
+				return
+			show_nextep_handoff_cover()
+		except Exception:
+			pass
+
+	def onPlayBackStopped(self):
+		self._maybe_show_nextep_handoff_cover()
+
+	def onPlayBackEnded(self):
+		self._maybe_show_nextep_handoff_cover()
 
 	def run(self, url=None, obj=None):
 		ku.hide_busy_dialog()
@@ -58,17 +90,29 @@ class MandoPlayer(xbmc.Player):
 
 	def play_video(self, url, obj):
 		self.set_constants(url, obj)
-		if self.is_generic:
-			ku.clear_video_playlist()
 		if not self.is_generic and self._resolve_cancelled():
 			self.playback_successful = False
 			self.cancel_all_playback = True
 			self.sources_object.cancel_all_playback = True
 			self.sources_object._resolve_user_cancelled = True
+			try:
+				self.sources_object._abort_plugin_resolve()
+			except Exception:
+				pass
 			return
 		ku.volume_checker()
 		ku.set_property(PROP_PLAY_OPENING, 'true')
-		self.play(self.url, self.make_listing())
+		listitem = self.make_listing()
+		# Kodi 22 home widgets / PlayMedia expect setResolvedUrl(); Player().play() from a
+		# plugin is unsupported and leaves the original plugin:// item unresolved →
+		# "One or more items failed to play" after stop. Fall back to play() when there is
+		# no resolve handle (RunPlugin, background nextep), Autoscrape nextep handoff
+		# (spent prior-episode handle), or the handle was already used by an earlier
+		# source in this scrape (multi-resolve queue).
+		if not self._play_via_resolved_url(listitem):
+			if self.is_generic:
+				ku.clear_video_playlist()
+			self.play(self.url, listitem)
 		if self.is_generic:
 			self.check_playback_start_generic()
 			if self.playback_successful:
@@ -82,10 +126,12 @@ class MandoPlayer(xbmc.Player):
 				ku.clear_property(PROP_PLAY_OPENING)
 				try:
 					if self.sources_object:
+						self.sources_object.playback_successful = True
 						self.sources_object._release_resolve_busy()
 						self.sources_object._release_sources_busy()
 				except:
 					pass
+				self._seek_to_resume_if_needed()
 				self._register_active_playback()
 				self.monitor()
 			else:
@@ -99,6 +145,10 @@ class MandoPlayer(xbmc.Player):
 				if cancelled:
 					if not self.sources_object._resolve_user_cancelled:
 						self.kill_dialog()
+					try:
+						self.sources_object._abort_plugin_resolve()
+					except Exception:
+						pass
 				else:
 					# Keep the resolver progress UI so play_file can try the next queued source.
 					self.run_error()
@@ -106,6 +156,77 @@ class MandoPlayer(xbmc.Player):
 				self.safe_stop()
 		try: del self.kodi_monitor
 		except: pass
+
+	def _plugin_handle(self):
+		try:
+			return int(sys.argv[1])
+		except Exception:
+			return -1
+
+	def _play_via_resolved_url(self, listitem):
+		handle = self._plugin_handle()
+		if handle <= 0:
+			return False
+		if not self.is_generic and getattr(self.sources_object, '_resolved_url_sent', False):
+			return False
+		# Autoscrape nextep handoff reuses the prior episode's spent PlayMedia handle —
+		# setResolvedUrl is a noop; Player.play() must open the first picked source.
+		if not self.is_generic and getattr(self.sources_object, '_use_player_play', False):
+			return False
+		try:
+			xbmcplugin.setResolvedUrl(handle, True, listitem)
+			if not self.is_generic:
+				self.sources_object._resolved_url_sent = True
+			self._played_via_resolve = True
+			return True
+		except Exception:
+			return False
+
+	def _seek_to_resume_if_needed(self):
+		# setResolvedUrl often ignores StartPercent on Kodi 22 / widget PlayMedia.
+		# Wait until duration is known (4K demux can take well over 500ms) then seek.
+		if not getattr(self, '_played_via_resolve', False):
+			return
+		try:
+			percent = float(self.playback_percent or 0)
+		except Exception:
+			return
+		if percent <= 0:
+			return
+		try:
+			total = 0.0
+			for _ in range(40):  # ~10s @ 250ms — matches slow HEVC open, not endless
+				if self._resolve_cancelled():
+					return
+				try:
+					if self.isPlayingVideo():
+						total = float(self.getTotalTime() or 0)
+						if total > 0:
+							break
+				except Exception:
+					pass
+				ku.sleep(250)
+			if total <= 0:
+				try:
+					ku.logger('Mando', 'Resume seek skipped: no duration yet (percent=%s)' % percent)
+				except Exception:
+					pass
+				return
+			target = total * percent / 100.0
+			try:
+				current = float(self.getTime() or 0)
+			except Exception:
+				current = 0.0
+			if current >= target - 5:
+				return
+			self.seekTime(target)
+			try:
+				ku.logger('Mando', 'Resume seek applied: %s%% -> %.1fs (was %.1fs / %.1fs)' % (
+					percent, target, current, total))
+			except Exception:
+				pass
+		except Exception:
+			pass
 
 	def _dismiss_kodi_playback_error_dialog(self):
 		# Kodi shows DialogConfirm (okdialog) when demux/open fails. Force-close so
@@ -200,6 +321,11 @@ class MandoPlayer(xbmc.Player):
 
 	def playback_close_dialogs(self):
 		self.sources_object.playback_successful = True
+		try:
+			from modules.sources import close_nextep_handoff_cover
+			close_nextep_handoff_cover()
+		except Exception:
+			pass
 		self.kill_dialog()
 		ku.sleep(200)
 		try:
@@ -215,14 +341,25 @@ class MandoPlayer(xbmc.Player):
 				play_random_continual = self.sources_object.random_continual
 				play_random = self.sources_object.random
 				disable_autoplay_next_episode = self.sources_object.disable_autoplay_next_episode
+				self.num_episodes = getattr(self.sources_object, 'num_episodes', None)
 				if disable_autoplay_next_episode: ku.notification('Scrape with Custom Values - Autoplay Next Episode Cancelled', 4500)
 				if any((play_random_continual, play_random, disable_autoplay_next_episode)): self.autoplay_nextep, self.autoscrape_nextep = False, False
 				else: self.autoplay_nextep, self.autoscrape_nextep = self.sources_object.autoplay_nextep, self.sources_object.autoscrape_nextep
+				# Play # Episodes: remaining count includes the current episode.
+				try: _play_n = int(self.num_episodes) if self.num_episodes not in (None, '') else 0
+				except: _play_n = 0
+				if _play_n > 1:
+					self.autoplay_nextep, self.autoscrape_nextep = True, False
+				elif self.num_episodes not in (None, '') and _play_n <= 1:
+					self.autoplay_nextep, self.autoscrape_nextep = False, False
 				if self.autoplay_nextep or self.autoscrape_nextep:
-					self._log_nextep('Next episode monitor active: autoplay=%s autoscrape=%s' % (self.autoplay_nextep, self.autoscrape_nextep))
+					self._log_nextep('Next episode monitor active: autoplay=%s autoscrape=%s play_n=%s' % (
+						self.autoplay_nextep, self.autoscrape_nextep, self.num_episodes or ''))
 				elif st.autoscrape_next_episode() or st.autoplay_next_episode():
-					self._log_nextep('Next episode disabled this play (random=%s random_continual=%s custom_values=%s)' % (play_random, play_random_continual, disable_autoplay_next_episode))
+					self._log_nextep('Next episode disabled this play (random=%s random_continual=%s custom_values=%s play_n=%s)' % (
+						play_random, play_random_continual, disable_autoplay_next_episode, self.num_episodes or ''))
 			else:
+				self.num_episodes = None
 				show_stinger, stinger_alert_timing, stingers_percentage_fallback = st.stingers_show(), st.stingers_alert_timing(), st.stingers_percentage()
 				play_random_continual, self.autoplay_nextep, self.autoscrape_nextep = False, False, False
 			while total_check_time <= 30 and not ku.get_visibility('Window.IsActive(fullscreenvideo)'):
@@ -255,14 +392,16 @@ class MandoPlayer(xbmc.Player):
 					_monitor_sleep_ms = 1000
 					if self.media_type == 'episode' and getattr(self, '_nextep_close_wait', False) and not getattr(self, '_nextep_stash_play_scheduled', False):
 						try:
-							_rem = round(float(self.getTotalTime()) - float(self.getTime()))
-							if 0 < _rem <= 10:
-								_monitor_sleep_ms = _NEXTEP_CLOSE_POLL_MS
+							if self._refresh_playback_position():
+								_rem = round(float(self.total_time) - float(self.curr_time))
+								if 0 < _rem <= 10:
+									_monitor_sleep_ms = _NEXTEP_CLOSE_POLL_MS
 						except:
 							pass
 					ku.sleep(_monitor_sleep_ms)
-					try: self.total_time, self.curr_time = self.getTotalTime(), self.getTime()
-					except: ku.sleep(250); continue
+					if not self._refresh_playback_position(allow_stale=False):
+						ku.sleep(250)
+						continue
 					if not self._valid_playback_duration(self.total_time, self.curr_time):
 						ku.sleep(250)
 						continue
@@ -270,7 +409,6 @@ class MandoPlayer(xbmc.Player):
 						self._intro_skip_fetch_started = True
 						self._start_intro_skip_fetch()
 					self._maybe_apply_intro_skip()
-					self.current_point = round(float(self.curr_time/self.total_time * 100), 1)
 					self._wetrakr_progress_tick()
 					self._punchplay_scrobble_progress()
 					if play_random_continual:
@@ -278,7 +416,7 @@ class MandoPlayer(xbmc.Player):
 							self.random_continual_triggered = True
 							self.run_random_continual()
 							break
-					elif self.current_point >= 90:
+					elif self.current_point >= self.watched_tick_percent:
 						if not self.media_marked: self.media_watched_marker()
 					if self.media_type == 'episode':
 						if self.autoplay_nextep or self.autoscrape_nextep:
@@ -307,9 +445,19 @@ class MandoPlayer(xbmc.Player):
 				if getattr(self, 'total_time', None) not in (None, '', 0, 0.0) and getattr(self, 'curr_time', None) not in (None, ''):
 					_remaining = round(float(self.total_time) - float(self.curr_time))
 				natural_end = (not playback_superseded and _remaining is not None and _remaining <= _NEXTEP_NATURAL_END_SEC)
+				# After Next Episode Ready, Stop in credits is a deliberate handoff (1.8.2
+				# "natural end only" was too strict vs subtitle/IntroDB alert windows).
+				ready_fired = self._autoscrape_handoff_ready()
 				if self.autoscrape_nextep and not playback_superseded:
-					if natural_end:
+					if natural_end or ready_fired:
 						ku.set_property(PROP_NEXTEP_NATURAL_END, 'true')
+						if ready_fired and not natural_end:
+							self._log_nextep('Autoscrape next episode: stop after Ready (remaining=%ss)' % (_remaining if _remaining is not None else '?'))
+						try:
+							from modules.sources import show_nextep_handoff_cover
+							show_nextep_handoff_cover()
+						except Exception:
+							pass
 					else:
 						ku.set_property(PROP_NEXTEP_NATURAL_END, 'false')
 						try:
@@ -329,7 +477,10 @@ class MandoPlayer(xbmc.Player):
 					if nextep_autoplay_cancelled() or nextep_end_play_superseded():
 						clear_nextep_autoplay_stash()
 						clear_orphan_nextep_play_stash()
-						self._log_nextep('Autoplay next episode: skipped at episode end (superseded by user playback)')
+						if nextep_autoplay_cancelled():
+							self._log_nextep('Autoplay next episode: skipped at episode end (cancelled)')
+						else:
+							self._log_nextep('Autoplay next episode: skipped at episode end (superseded by user playback)')
 					elif getattr(self, '_nextep_stash_play_scheduled', False):
 						autoplay_stash_scheduled = True
 					elif getattr(self, '_nextep_alert_shown', False):
@@ -343,7 +494,15 @@ class MandoPlayer(xbmc.Player):
 				except: pass
 			if not autoplay_stash_scheduled:
 				ku.hide_busy_dialog()
+			# Re-sample position before mark — stop often races getTime() (seek then Stop).
+			self._refresh_playback_position(allow_stale=True)
 			if not playback_superseded and not self.media_marked: self.media_watched_marker()
+			# Wipe Kodi MyVideos bookmarks for plugin:// paths so the next home-widget
+			# click does not show Resume/Start over before scrape (Umbrella pattern).
+			try:
+				from modules.watched_status import clear_local_bookmarks
+				clear_local_bookmarks()
+			except: pass
 			self.clear_playback_properties(clear_navigation=False)
 			self._release_active_playback()
 		except:
@@ -394,7 +553,7 @@ class MandoPlayer(xbmc.Player):
 			listitem.setLabel(self.title)
 			fresh_start = False
 			if self.media_type == 'movie':
-				plot = self.meta_get('plot')
+				plot = self.meta_get('plot') if st.show_loading_plot() else ''
 				listitem.setArt({'poster': poster, 'fanart': fanart, 'icon': poster, 'clearlogo': clearlogo})
 				info_tag = listitem.getVideoInfoTag(True)
 				info_tag.setMediaType('movie'), info_tag.setTitle(self.title), info_tag.setOriginalTitle(self.meta_get('original_title')), info_tag.setPlot(plot)
@@ -404,7 +563,8 @@ class MandoPlayer(xbmc.Player):
 				info_tag.setWriters(writer), info_tag.setDirectors(director), info_tag.setUniqueIDs({'imdb': self.imdb_id, 'tmdb': str(self.tmdb_id)})
 				info_tag.setCast([ku.kodi_actor()(name=item['name'], role=item['role'], thumbnail=item['thumbnail']) for item in cast])
 			else:
-				if st.avoid_episode_spoilers() and int(self.meta_get('playcount', '0')) == 0: plot = self.meta_get('tvshow_plot') or '* Hidden to Prevent Spoilers *'
+				if not st.show_loading_plot(): plot = ''
+				elif st.avoid_episode_spoilers() and int(self.meta_get('playcount') or 0) == 0: plot = self.meta_get('tvshow_plot') or '* Hidden to Prevent Spoilers *'
 				else: plot = self.meta_get('plot') or self.meta_get('tvshow_plot')
 				listitem.setArt({'poster': poster, 'fanart': fanart, 'icon': poster, 'clearlogo': clearlogo, 'tvshow.poster': poster, 'tvshow.clearlogo': clearlogo})
 				info_tag = listitem.getVideoInfoTag(True)
@@ -472,7 +632,7 @@ class MandoPlayer(xbmc.Player):
 		percent = self.playback_percent if self.playback_percent else 0
 		Thread(target=punchplay_scrobble, args=('start', self.media_type, self.tmdb_id, percent, self.season, self.episode),
 			kwargs={'title': getattr(self, 'title', '') or '', 'year': getattr(self, 'year', None),
-				'session_id': self._punchplay_session_id}).start()
+				'session_id': self._punchplay_session_id}, daemon=True).start()
 
 	def _punchplay_scrobble_progress(self):
 		if self.is_generic or st.watched_indicators() != 4 or not st.punchplay_user_active(): return
@@ -485,7 +645,7 @@ class MandoPlayer(xbmc.Player):
 		session_id = getattr(self, '_punchplay_session_id', None)
 		Thread(target=punchplay_scrobble, args=('progress', self.media_type, self.tmdb_id, self.current_point, self.season, self.episode),
 			kwargs={'title': getattr(self, 'title', '') or '', 'year': getattr(self, 'year', None),
-				'session_id': session_id}).start()
+				'session_id': session_id}, daemon=True).start()
 
 	def _punchplay_scrobble_stop(self, percent):
 		if self.is_generic or st.watched_indicators() != 4 or not st.punchplay_user_active(): return
@@ -494,7 +654,7 @@ class MandoPlayer(xbmc.Player):
 		session_id = getattr(self, '_punchplay_session_id', None)
 		Thread(target=punchplay_scrobble, args=('stop', self.media_type, self.tmdb_id, percent, self.season, self.episode),
 			kwargs={'title': getattr(self, 'title', '') or '', 'year': getattr(self, 'year', None),
-				'session_id': session_id}).start()
+				'session_id': session_id}, daemon=True).start()
 
 	def _wetrakr_meta_kwargs(self, percent):
 		ep_title = ''
@@ -559,8 +719,16 @@ class MandoPlayer(xbmc.Player):
 	def media_watched_marker(self, force_watched=False):
 		self.media_marked = True
 		try:
+			self._refresh_playback_position(allow_stale=True)
 			current_point = getattr(self, 'current_point', 0) or 0
-			if current_point >= 90 or force_watched:
+			try:
+				ku.logger('Mando', 'playback stop progress: %.1f%% (curr=%.1fs total=%.1fs)' % (
+					float(current_point), float(getattr(self, 'curr_time', 0) or 0), float(getattr(self, 'total_time', 0) or 0)))
+			except Exception:
+				pass
+			tick_at = getattr(self, 'watched_tick_percent', None)
+			if tick_at is None: tick_at = st.playback_watched_percent()
+			if current_point >= tick_at or force_watched:
 				self._trakt_scrobble_stop(100)
 				self._simkl_scrobble_stop(100)
 				self._punchplay_scrobble_stop(100)
@@ -568,7 +736,7 @@ class MandoPlayer(xbmc.Player):
 				watched_function = ws.mark_movie if self.media_type == 'movie' else ws.mark_episode
 				watched_params = {'action': 'mark_as_watched', 'tmdb_id': self.tmdb_id, 'title': self.title, 'year': self.year, 'season': self.season, 'episode': self.episode,
 									'tvdb_id': self.tvdb_id, 'from_playback': 'true'}
-				Thread(target=self.run_media_progress, args=(watched_function, watched_params)).start()
+				Thread(target=self.run_media_progress, args=(watched_function, watched_params), daemon=True).start()
 			else:
 				# Always stop Trakt live scrobble so Playing now clears. Below ~80% Trakt treats stop as pause + resume.
 				self._trakt_scrobble_stop(current_point)
@@ -579,7 +747,13 @@ class MandoPlayer(xbmc.Player):
 				if current_point >= 5:
 					progress_params = {'media_type': self.media_type, 'tmdb_id': self.tmdb_id, 'curr_time': self.curr_time, 'total_time': self.total_time,
 									'title': self.title, 'season': self.season, 'episode': self.episode, 'from_playback': 'true'}
-					Thread(target=self.run_media_progress, args=(ws.set_bookmark, progress_params)).start()
+					# Local DB sync so In Progress is correct even if the remote scrobble
+					# thread is still running when the invoker exits; remote stays async.
+					try:
+						ws.set_bookmark(progress_params, remote=False)
+					except Exception:
+						pass
+					Thread(target=self.run_media_progress, args=(ws.set_bookmark, progress_params), daemon=True).start()
 		except: pass
 
 	def run_media_progress(self, function, params):
@@ -666,9 +840,10 @@ class MandoPlayer(xbmc.Player):
 			return None
 
 	def _owns_active_playback(self):
+		# Key compare only — do not call isPlayingVideo() here. During seek/cache Kodi can
+		# briefly report not-playing; treating that as "superseded" exits the monitor early
+		# and skips progress save while the stream keeps going.
 		try:
-			if not self.isPlayingVideo():
-				return False
 			active = ku.get_property(PROP_ACTIVE_PLAYBACK_KEY)
 			mine = self._playback_meta_key()
 			if not active or not mine:
@@ -676,6 +851,74 @@ class MandoPlayer(xbmc.Player):
 			return active == mine
 		except:
 			return False
+
+	def _parse_player_time_label(self, value):
+		if value in (None, '', '0', '0:00', '0:00:00', 'N/A'):
+			return None
+		try:
+			return float(value)
+		except Exception:
+			pass
+		try:
+			parts = str(value).strip().split(':')
+			if len(parts) == 3:
+				return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+			if len(parts) == 2:
+				return int(parts[0]) * 60 + float(parts[1])
+		except Exception:
+			pass
+		return None
+
+	def _read_player_times(self):
+		'''Live player position. Prefer Player API; fall back to InfoLabels (seek-safe).'''
+		curr = total = None
+		try:
+			if self.isPlayingVideo():
+				total = float(self.getTotalTime())
+				curr = float(self.getTime())
+		except Exception:
+			curr = total = None
+		if total in (None, 0, 0.0) or curr in (None,):
+			try:
+				total = self._parse_player_time_label(ku.get_infolabel('Player.Duration'))
+				curr = self._parse_player_time_label(ku.get_infolabel('Player.Time'))
+			except Exception:
+				pass
+		if (curr in (None,) or total in (None, 0, 0.0)):
+			try:
+				pct = ku.get_infolabel('Player.Percentage')
+				if pct not in (None, '', '0', '0.0') and total not in (None, 0, 0.0):
+					curr = (float(pct) / 100.0) * float(total)
+				elif pct not in (None, '', '0', '0.0') and getattr(self, 'total_time', None) not in (None, 0, 0.0, ''):
+					total = float(self.total_time)
+					curr = (float(pct) / 100.0) * total
+			except Exception:
+				pass
+		return curr, total
+
+	def _refresh_playback_position(self, allow_stale=True):
+		'''Update curr_time / total_time / current_point. Keep last good sample if live read fails.'''
+		curr, total = self._read_player_times()
+		if total not in (None, 0, 0.0) and curr not in (None,) and float(total) >= 60 and float(curr) > 0:
+			# Honour forward seeks: never shrink a known larger position on a bad post-seek sample.
+			prev = getattr(self, 'curr_time', None)
+			try:
+				prev_f = float(prev) if prev not in (None, '') else 0.0
+			except Exception:
+				prev_f = 0.0
+			if float(curr) + 2.0 < prev_f and prev_f > 30:
+				# Likely a transient 0/start sample after seek — keep previous.
+				curr = prev_f
+			self.total_time, self.curr_time = float(total), float(curr)
+			self.current_point = round(float(self.curr_time) / float(self.total_time) * 100, 1)
+			return True
+		if allow_stale and getattr(self, 'total_time', None) not in (None, 0, 0.0, '') and getattr(self, 'curr_time', None) not in (None, '', 0, 0.0):
+			try:
+				self.current_point = round(float(self.curr_time) / float(self.total_time) * 100, 1)
+				return True
+			except Exception:
+				pass
+		return False
 
 	def _register_active_playback(self):
 		key = self._playback_meta_key()
@@ -763,7 +1006,9 @@ class MandoPlayer(xbmc.Player):
 		else: play_type = 'autoscrape_nextep'
 		nextep_settings = st.auto_nextep_settings(play_type)
 		pop_at, _timing_source = self._pop_window_seconds(nextep_settings, self.total_time)
-		self.random_continual_start_prep = self._start_prep_seconds(nextep_settings, pop_at, play_type, include_still_watching=False)
+		# Headroom for Still Watching when Check Still Watching After X is enabled (Continual Random).
+		include_still_watching = bool(nextep_settings.get('watching_check', 0))
+		self.random_continual_start_prep = self._start_prep_seconds(nextep_settings, pop_at, play_type, include_still_watching)
 
 	def _should_prep_random_continual(self):
 		if getattr(self, 'random_continual_triggered', False): return False
@@ -874,6 +1119,11 @@ class MandoPlayer(xbmc.Player):
 		episode = meta.get('episode', self.episode)
 		poster = meta.get('poster') or self.meta_get('poster')
 		ku.notification('[B]Next Episode Ready:[/B] %s S%02dE%02d' % (title, season, episode), 6500, poster)
+		try:
+			from modules.sources import arm_nextep_handoff_cover
+			arm_nextep_handoff_cover()
+		except Exception:
+			pass
 		self._log_nextep('Autoscrape next episode ready notify: remaining=%ss window=%ss' % (remaining, window))
 
 	def _try_autoplay_early_stash_play(self):
@@ -916,6 +1166,11 @@ class MandoPlayer(xbmc.Player):
 		stash = peek_nextep_autoplay_stash()
 		if not stash: return
 		settings = self.nextep_settings
+		# Play # Episodes: silent chain — wait for natural end, then play stashed next.
+		if settings.get('play_n_episodes'):
+			self._nextep_close_wait = True
+			self._log_nextep('Play # Episodes: silent continue (remaining after this=%s)' % settings.get('num_episodes'))
+			return
 		use_window = settings.get('use_window')
 		default_action = settings.get('default_action')
 		dialog_meta = stash['meta']
@@ -1023,10 +1278,25 @@ class MandoPlayer(xbmc.Player):
 		credits_entry = self._subtitle_credits_entry_remaining(fetch=False) if nextep_settings.get('alert_timing') == 'subtitles' else None
 		use_window = nextep_settings['alert_method'] == 0
 		default_action = nextep_settings['default_action']
-		self.start_prep = self._start_prep_seconds(nextep_settings, pop_at, play_type)
-		pipeline = st.nextep_pipeline_headroom(play_type, nextep_settings['scraper_time'], self._still_watching_due(nextep_settings))
+		# Play # Episodes: no Still Watching budget; headroom without that dialog.
+		play_n_active = False
+		try: play_n_remaining = int(self.num_episodes) if getattr(self, 'num_episodes', None) not in (None, '') else 0
+		except: play_n_remaining = 0
+		if play_n_remaining > 1:
+			play_n_active = True
+			use_window = False
+			default_action = 'close'
+		still_watching_due = False if play_n_active else self._still_watching_due(nextep_settings)
+		self.start_prep = self._start_prep_seconds(nextep_settings, pop_at, play_type, include_still_watching=not play_n_active)
+		pipeline = st.nextep_pipeline_headroom(play_type, nextep_settings['scraper_time'], still_watching_due)
 		self.nextep_settings = {'use_window': use_window, 'window_time': pop_at, 'default_action': default_action, 'play_type': play_type,
-			'alert_timing': nextep_settings.get('alert_timing'), 'watching_check': nextep_settings['watching_check'], 'pipeline_headroom': pipeline, 'credits_entry': credits_entry}
+			'alert_timing': nextep_settings.get('alert_timing'),
+			'watching_check': 0 if play_n_active else nextep_settings['watching_check'],
+			'pipeline_headroom': pipeline, 'credits_entry': credits_entry}
+		if play_n_active:
+			# Count for the *next* episode includes that episode; stop when it reaches 1.
+			self.nextep_settings['num_episodes'] = str(play_n_remaining - 1)
+			self.nextep_settings['play_n_episodes'] = True
 		if nextep_settings.get('alert_timing') == 'introdb':
 			outro_start = self._outro_credits_start(fetch=True)
 			if outro_start is not None:
@@ -1034,8 +1304,9 @@ class MandoPlayer(xbmc.Player):
 		credits_log = ' credits_entry=%ss' % credits_entry if credits_entry is not None else ''
 		outro_start = self.nextep_settings.get('outro_start')
 		outro_log = ' outro_start=%.1fs' % outro_start if outro_start is not None else ''
-		self._log_nextep('Next episode timing: play_type=%s alert=%s source=%s pop_at=%ss pipeline=%ss start_prep=%ss total=%ss%s%s' % (
-			play_type, nextep_settings.get('alert_timing'), timing_source, pop_at, pipeline, self.start_prep, round(float(self.total_time)), credits_log, outro_log))
+		play_n_log = ' play_n=%s' % play_n_remaining if play_n_remaining else ''
+		self._log_nextep('Next episode timing: play_type=%s alert=%s source=%s pop_at=%ss pipeline=%ss start_prep=%ss total=%ss%s%s%s' % (
+			play_type, nextep_settings.get('alert_timing'), timing_source, pop_at, pipeline, self.start_prep, round(float(self.total_time)), credits_log, outro_log, play_n_log))
 
 	def final_chapter(self, threshhold):
 		try:
@@ -1267,6 +1538,7 @@ class MandoPlayer(xbmc.Player):
 			self.meta_get, self.playback_percent = self.meta.get, self.sources_object.playback_percent or 0.0
 			self.playing_filename = self.sources_object.playing_filename
 			self.media_marked, self.nextep_info_gathered, self.movie_stingers_run = False, False, False
+			self.watched_tick_percent = st.playback_watched_percent()
 			self.current_point = 0
 			self.subs_searched = False
 			self._subtitle_end_remaining_cached = '__unset__'
@@ -1297,7 +1569,11 @@ class MandoPlayer(xbmc.Player):
 
 	def _start_intro_skip_fetch(self):
 		play_type = getattr(self.sources_object, 'play_type', '')
-		if not st.autoplay_skip_intro_enabled(play_type) or self.media_type != 'episode':
+		if self.media_type != 'episode':
+			return
+		if not st.autoplay_skip_intro_enabled(play_type):
+			self._log_intro_skip('Intro skip: disabled (mode=%s all_episodes=%s)' % (
+				st.skip_intro_mode(), st.skip_intro_all_episodes()))
 			return
 		self._intro_skip_active = True
 		self._intro_skip_done = False
@@ -1307,7 +1583,12 @@ class MandoPlayer(xbmc.Player):
 		self._intro_skip_no_timing_logged = False
 		try:
 			from apis.intro_skip_api import peek_intro_segment_cache
-			cached = peek_intro_segment_cache(self.tmdb_id, self.imdb_id, self.season, self.episode)
+			duration = None
+			try:
+				total = getattr(self, 'total_time', None)
+				if total not in (None, '', 0, 0.0): duration = float(total)
+			except: pass
+			cached = peek_intro_segment_cache(self.tmdb_id, self.imdb_id, self.season, self.episode, duration)
 			if cached != '__miss__':
 				self._intro_skip_fetch_done = True
 				if cached:
@@ -1350,8 +1631,6 @@ class MandoPlayer(xbmc.Player):
 				return
 			start_sec = total * start_pct / 100.0
 			end_sec = total * end_pct / 100.0
-			if start_sec < _INTRO_CHAPTER_MIN_START_SEC:
-				return
 			if end_sec - start_sec < _INTRO_CHAPTER_MIN_SEGMENT_SEC or end_sec < _INTRO_CHAPTER_MIN_END_SEC:
 				return
 			self._intro_skip_segment = {'start_sec': start_sec, 'end_sec': end_sec, 'source': 'chapters'}
@@ -1422,27 +1701,26 @@ class MandoPlayer(xbmc.Player):
 		except: pass
 		return False
 
+	def _restore_fullscreen_after_intro_skip(self):
+		try:
+			from windows.playback_notifications import _restore_fullscreen_playback
+			_restore_fullscreen_playback(self)
+		except Exception:
+			pass
+
 	def _execute_intro_skip_seek(self, start_sec, end_sec, source):
+		# One seek only — a 400ms getTime() check often still shows the old
+		# playhead, so the old retry fired a second seekTime while the first
+		# was in flight (Amlogic / CoreELEC decoder panic, #220).
 		if not self._player_is_active():
 			self._log_intro_skip('Intro skip failed: player inactive')
 			return False
-		if not self.seek(end_sec, False):
+		ok = self.seek(end_sec, False)
+		# No-op if the prompt already restored fullscreen. Do not re-assert
+		# during an in-flight seek (that hitch was the post-Yes freeze).
+		self._restore_fullscreen_after_intro_skip()
+		if not ok:
 			self._log_intro_skip('Intro skip failed: seek rejected')
-			return False
-		try:
-			ku.sleep(400)
-			actual = float(self.getTime())
-			if abs(actual - end_sec) > 8:
-				if not self.seek(end_sec, False):
-					self._log_intro_skip('Intro skip failed: seek did not stick (at %.1fs, wanted %.1fs)' % (actual, end_sec))
-					return False
-				ku.sleep(400)
-				actual = float(self.getTime())
-				if abs(actual - end_sec) > 8:
-					self._log_intro_skip('Intro skip failed: seek did not stick (at %.1fs, wanted %.1fs)' % (actual, end_sec))
-					return False
-		except Exception as exc:
-			self._log_intro_skip('Intro skip failed: seek verify (%s)' % exc)
 			return False
 		self._log_intro_skip('Intro skip (%s): %.1fs -> %.1fs' % (source, start_sec, end_sec))
 		return True
@@ -1451,6 +1729,12 @@ class MandoPlayer(xbmc.Player):
 		if not self._player_is_active():
 			return False
 		try:
+			try:
+				curr = float(self.curr_time)
+				seg = getattr(self, '_intro_skip_segment', None) or {}
+				self._log_intro_skip('Intro skip: opening prompt at %.1fs (segment %.1fs-%.1fs)' % (
+					curr, float(seg.get('start_sec', 0) or 0), float(seg.get('end_sec', 0) or 0)))
+			except: pass
 			from windows.base_window import open_window
 			return open_window(('windows.playback_notifications', 'IntroSkipPrompt'), 'playback_notifications.xml',
 				meta=self.meta, countdown_sec=_INTRO_SKIP_PROMPT_COUNTDOWN_SEC)
@@ -1470,6 +1754,8 @@ class MandoPlayer(xbmc.Player):
 		if self._intro_skip_past_segment(segment):
 			if getattr(self, '_intro_skip_approved', False):
 				self._log_intro_skip('Intro skip missed: past grace window')
+			else:
+				self._log_intro_skip('Intro skip: past intro (prompt not shown)')
 			self._intro_skip_done = True
 			return
 		try:
@@ -1495,6 +1781,7 @@ class MandoPlayer(xbmc.Player):
 					self._log_intro_skip('Intro skip: declined')
 					return
 				self._intro_skip_approved = True
+				ku.sleep(_INTRO_SKIP_SEEK_SETTLE_MS)
 				try:
 					curr = float(self.curr_time)
 				except:
@@ -1533,7 +1820,7 @@ class MandoPlayer(xbmc.Player):
 			playing_item = getattr(self, 'playing_item', None)
 			if st.submaker_enabled():
 				from indexers.subtitles import Subtitles
-				Thread(target=Subtitles().run, args=(self.imdb_id, season, episode, poster, playing_filename, playing_item, self)).start()
+				Thread(target=Subtitles().run, args=(self.imdb_id, season, episode, poster, playing_filename, playing_item, self, year)).start()
 			elif st.opensubs_enabled():
 				from indexers.subtitles import OpenSubtitlesSubs
 				Thread(target=OpenSubtitlesSubs().run, args=(self.imdb_id, season, episode, poster, year, playing_filename, playing_item, self)).start()

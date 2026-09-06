@@ -2,17 +2,20 @@
 """WeTrakr scrobble-only integration (device OAuth + Kodi webhook).
 
 Does not sync watched ticks, resume, or lists into Mando. Prefer
-Watched Indicators = Mando (or another provider) for UI state.
+Watched Status Provider = Mando (or another provider) for UI state.
 """
 import json
 import time
 import requests
 from caches.settings_cache import get_setting, set_setting
 from modules import kodi_utils, settings
-from modules.utils import copy2clip, make_qrcode
+from modules.utils import copy2clip, make_qrcode, make_tinyurl, \
+							device_auth_complete_url, device_auth_site_label, authorise_wait_text
 
 BASE_URL = 'https://api.wetrakr.com'
 APP_UA = 'Mando-WeTrakr/%s' % kodi_utils.addon_version()
+
+WETRAKR_TRAKT_IMPORT_URL = 'https://wetrakr.com/profile/settings/data'
 
 WETRAKR_SCROBBLE_ONLY_TEXT = (
 	'[B]WeTrakr is scrobble-only in Mando.[/B][CR][CR]'
@@ -22,6 +25,8 @@ WETRAKR_SCROBBLE_ONLY_TEXT = (
 	'so titles can show in WeTrakr (Now Playing / history).[CR][CR]'
 	'It does [B]not[/B] bring watched ticks, resume points, Next Episodes, or lists '
 	'back into Mando.[CR][CR]'
+	'Use [B]Import Trakt to WeTrakr[/B] to open WeTrakr\'s official import page (QR or link) '
+	'if you want history on WeTrakr itself — that still does not change ticks in Mando.[CR][CR]'
 	'Keep [B]Watched Status Provider[/B] on [B]Mando[/B] (or MDBList / PunchPlay / Simkl / Trakt) '
 	'for ticks and lists in the addon.'
 )
@@ -168,18 +173,14 @@ def wetrakr_authenticate(dummy=''):
 		return kodi_utils.notification('WeTrakr Authorisation Failed', 3000, icon)
 	user_code = str(code_data.get('user_code') or '')
 	device_code = code_data.get('device_code')
-	verification_url = (code_data.get('verification_url') or 'https://wetrakr.com/activate').rstrip('/')
 	expires_in = int(code_data.get('expires_in') or 600)
 	interval = max(int(code_data.get('interval') or 5), 1)
-	auth_url = verification_url if 'code=' in verification_url else (
-		'%s?code=%s' % (verification_url, user_code) if user_code else verification_url)
+	auth_url = device_auth_complete_url(code_data, user_code, fallback='https://wetrakr.com/activate', style='query')
 	qr_code = make_qrcode(auth_url) or icon
 	try: copy2clip(auth_url)
 	except: pass
-	content = (
-		'Enter [B]%s[/B] at [B]%s[/B][CR]OR scan the [B]QR Code[/B][CR]'
-		'Link copied to clipboard[CR][CR]Waiting for authorisation...'
-		% (user_code, verification_url.replace('https://', '')))
+	short_url = make_tinyurl(auth_url)
+	content = authorise_wait_text(user_code, device_auth_site_label(code_data, 'https://wetrakr.com/activate'), short_url)
 	progress = kodi_utils.progress_dialog('WeTrakr Authorise', qr_code)
 	progress.update(content, 0)
 	expires = time.time() + expires_in
@@ -199,7 +200,7 @@ def wetrakr_authenticate(dummy=''):
 			if error and error not in ('authorization_pending', 'slow_down'):
 				kodi_utils.logger('WeTrakr', 'poll: %s' % error)
 		progress.update(content, int(100 * (1 - (expires - time.time()) / float(expires_in))))
-		kodi_utils.sleep(interval * 1000)
+		if kodi_utils.sleep_while_authorising(progress, interval): break
 	try: progress.close()
 	except: pass
 	if not token:
@@ -224,3 +225,11 @@ def wetrakr_revoke_authentication(dummy=''):
 def wetrakr_about(dummy=''):
 	kodi_utils.ok_dialog(heading='WeTrakr (Scrobble Only)', text=WETRAKR_SCROBBLE_ONLY_TEXT, scroll=True)
 	return True
+
+def wetrakr_import_trakt(params=None):
+	from modules.trakt_import_help import open_official_trakt_import_page
+	return open_official_trakt_import_page(
+		'WeTrakr', WETRAKR_TRAKT_IMPORT_URL,
+		icon=_wetrakr_icon(),
+		close_hint='. This does not change watched ticks in Mando',
+		fallback_hint='When finished, watched ticks in Mando still follow Watched Status Provider — not WeTrakr.')
