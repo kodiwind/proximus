@@ -1,26 +1,29 @@
-<addon id="plugin.video.morbius" name="[COLORghostwhite]Morbius[/COLOR]" provider-name="[COLOR darkskyblue]The Hood[/COLOR]" version="4.4.2a">
-    <requires>
-        <import addon="xbmc.python" version="3.0.0"/>
-        <import addon="script.module.pil" version="1.1.7"/>
-        <import addon="script.module.requests" version="2.19.1"/>
-		<import addon="script.module.morbiusscrapers" version="1.0.0"/>
-    </requires>
-    <extension point="xbmc.python.pluginsource" library="resources/lib/morbius.py">
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="plugin.video.morbius"                                                                                                                                    
+	   name="Morbius"                                                 
+	   version="3.6.5"                                                                                                                                        
+	   provider-name="The Hood">
+  <requires>
+	<import addon="script.module.requests"/> 
+  </requires>
+  <extension point="xbmc.python.pluginsource"
+            library="default.py">
         <provides>video</provides>
-    </extension>
-    <extension point="xbmc.service" library="resources/lib/service.py"/>
-    <extension point="xbmc.python.module" library="resources/lib/"/>
-    <extension point="xbmc.addon.metadata">
-        <reuselanguageinvoker>true</reuselanguageinvoker>
-        <summary lang="en">[COLOR ghostwhite]Stream Content. The Morbius way...[/COLOR]</summary>
-        <description lang="en">This is a Non-profit resource, organized solely for educational purposes which is protected under the Fair-Use doctrine of the Copyright Act, Specifically section 107, which does promote freedom of expression, by permitting the unlicensed use of copyright-protected works.</description>
-        <platform>all</platform>
-		<disclaimer lang="en">The author of this addon does not host any of the content which is found and has no affiliation with any of the content providers.</disclaimer>
-        <license/>
-        <assets>
+  </extension>
+  <extension library="resources/modules/" point="xbmc.python.module" />
+  <extension library="resources/sources/" point="xbmc.python.module" />
+  <extension library="resources/" point="xbmc.python.module" />
+  <extension point="xbmc.addon.metadata">
+	<reuselanguageinvoker>true</reuselanguageinvoker>
+    <summary lang="en">The best and latest Movies and TV Shows from around the net</summary>
+    <description lang="en">Morbius states all the media as fast as possible</description>
+	
+    <platform>all</platform>
+	<assets>
             <icon>icon.png</icon>
+			<icon>icon2.png</icon>
             <fanart>fanart.jpg</fanart>
-        </assets>
-        <news>INFO: For latest changes see Changelog within Tools of add-on.</news>
-    </extension>
+    </assets>
+  </extension>
+  
 </addon>

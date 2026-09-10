@@ -1,823 +1,1029 @@
 # -*- coding: utf-8 -*-
-import json
+
+import re
+import sys
 import time
-from threading import Thread
-from windows.base_window import open_window, create_window
-from caches.episode_groups_cache import episode_groups_cache
-from caches.settings_cache import get_setting
-from scrapers import external, folders
-from modules import debrid, kodi_utils, settings, metadata, watched_status
-from modules.player import morbiusPlayer
-from modules.source_utils import get_cache_expiry, make_alias_dict, include_exclude_filters
-from modules.utils import clean_file_name, string_to_float, safe_string, remove_accents, get_datetime, append_module_to_syspath, manual_function_import
-# logger = kodi_utils.logger
-
-class Sources():
-	def __init__(self):
-		self.params = {}
-		self.prescrape_scrapers, self.prescrape_threads, self.prescrape_sources, self.uncached_results = [], [], [], []
-		self.threads, self.providers, self.sources, self.internal_scraper_names, self.remove_scrapers = [], [], [], [], ['external']
-		self.rescrape_cache_ignored, self.original_year_ignored, self.rescrape_with_all, self.rescrape_with_episode_group = False, False, False, False
-		self.clear_properties, self.filters_ignored, self.active_folders, self.resolve_dialog_made, self.episode_group_used = True, False, False, False, False
-		self.sources_total = self.sources_4k = self.sources_1080p = self.sources_720p = self.sources_sd = 0
-		self.prescrape, self.disabled_ext_ignored = 'true', 'false'
-		self.ext_name, self.ext_folder = '', ''
-		self.progress_dialog, self.progress_thread = None, None
-		self.playing_filename = ''
-		self.count_tuple = (('sources_4k', '4K', self._quality_length), ('sources_1080p', '1080p', self._quality_length), ('sources_720p', '720p', self._quality_length),
-							('sources_sd', '', self._quality_length_sd), ('sources_total', '', self._quality_length_final))
-		self.filter_keys = include_exclude_filters()
-		self.filter_keys.pop('hybrid')
-		self.default_internal_scrapers = ('easynews', 'rd_cloud', 'pm_cloud', 'ad_cloud', 'oc_cloud', 'tb_cloud', 'folders')
-		self.debrids = {'Real-Debrid': ('apis.real_debrid_api', 'RealDebridAPI'), 'rd_cloud': ('apis.real_debrid_api', 'RealDebridAPI'),
-		'rd_browse': ('apis.real_debrid_api', 'RealDebridAPI'), 'Premiumize.me': ('apis.premiumize_api', 'PremiumizeAPI'), 'pm_cloud': ('apis.premiumize_api', 'PremiumizeAPI'),
-		'pm_browse': ('apis.premiumize_api', 'PremiumizeAPI'), 'AllDebrid': ('apis.alldebrid_api', 'AllDebridAPI'), 'ad_cloud': ('apis.alldebrid_api', 'AllDebridAPI'),
-		'ad_browse': ('apis.alldebrid_api', 'AllDebridAPI'), 'Offcloud': ('apis.offcloud_api', 'OffcloudAPI'), 'oc_cloud': ('apis.offcloud_api', 'OffcloudAPI'),
-		'oc_browse': ('apis.offcloud_api', 'OffcloudAPI'), 'EasyDebrid': ('apis.easydebrid_api', 'EasyDebridAPI'), 'ed_cloud': ('apis.easydebrid_api', 'EasyDebridAPI'),
-		'ed_browse': ('apis.easydebrid_api', 'EasyDebridAPI'), 'TorBox': ('apis.torbox_api', 'TorBoxAPI'), 'tb_cloud': ('apis.torbox_api', 'TorBoxAPI'),
-		'tb_browse': ('apis.torbox_api', 'TorBoxAPI')}
-
-	def playback_prep(self, params=None):
-		kodi_utils.hide_busy_dialog()
-		if params: self.params = params
-		params_get = self.params.get
-		self.play_type, self.background, self.prescrape = params_get('play_type', ''), params_get('background', 'false') == 'true', params_get('prescrape', self.prescrape) == 'true'
-		self.random, self.random_continual = params_get('random', 'false') == 'true', params_get('random_continual', 'false') == 'true'
-		if 'external_cache_check' in self.params: self.external_cache_check = params_get('external_cache_check') == 'true'
-		else: self.external_cache_check = settings.external_cache_check()
-		if self.play_type:
-			if self.play_type == 'autoplay_nextep': self.autoplay_nextep, self.autoscrape_nextep = True, False
-			elif self.play_type == 'random_continual': self.autoplay_nextep, self.autoscrape_nextep = False, False
-			else: self.autoplay_nextep, self.autoscrape_nextep = False, True
-		else: self.autoplay_nextep, self.autoscrape_nextep = settings.autoplay_next_episode(), settings.autoscrape_next_episode()
-		self.autoscrape = self.autoscrape_nextep and self.background		
-		self.auto_rescrape_cache_ignored, self.auto_rescrape_imdb_year = settings.auto_rescrape_cache_ignored(), settings.auto_rescrape_imdb_year()
-		self.auto_rescrape_with_all, self.auto_episode_group = settings.auto_rescrape_with_all(), settings.auto_episode_group()
-		self.ignore_scrape_filters = params_get('ignore_scrape_filters', 'false') == 'true'
-		self.nextep_settings, self.disable_autoplay_next_episode = params_get('nextep_settings', {}), params_get('disable_autoplay_next_episode', 'false') == 'true'
-		self.disabled_ext_ignored = params_get('disabled_ext_ignored', self.disabled_ext_ignored) == 'true'
-		self.folders_ignore_filters = get_setting('morbius.results.folders_ignore_filters', 'false') == 'true'
-		self.filter_size_method = int(get_setting('morbius.results.filter_size_method', '0'))
-		self.media_type, self.tmdb_id = params_get('media_type'), params_get('tmdb_id')		
-		self.custom_title, self.custom_year = params_get('custom_title', None), params_get('custom_year', None)
-		self.episode_group_label, self.episode_id = params_get('episode_group_label', ''), params_get('episode_id', None)
-		if self.media_type == 'episode':
-			self.season, self.episode = int(params_get('season')), int(params_get('episode'))
-			self.custom_season, self.custom_episode = params_get('custom_season', None), params_get('custom_episode', None)
-			self.check_episode_group()
-		else: self.season, self.episode, self.custom_season, self.custom_episode = '', '', '', ''
-		if 'autoplay' in self.params: self.autoplay = params_get('autoplay', 'false') == 'true'
-		else: self.autoplay = settings.auto_play(self.media_type)
-		self.get_meta()
-		self.determine_scrapers_status()
-		self.sleep_time, self.provider_sort_ranks, self.scraper_settings = 100, settings.provider_sort_ranks(), settings.scraping_settings()
-		self.include_prerelease_results, self.ignore_results_filter = settings.include_prerelease_results(), settings.ignore_results_filter()
-		self.limit_resolve = settings.limit_resolve()
-		self.weight_size = settings.size_sort_weighted()
-		self.sort_function, self.quality_filter = settings.results_sort_order(), self._quality_filter()
-		self.include_unknown_size = get_setting('morbius.results.size_unknown', 'false') == 'true'
-		self.make_search_info()
-		if self.autoscrape: self.autoscrape_nextep_handler()
-		else: return self.get_sources()
-
-	def check_episode_group(self):
-		try:
-			if any([self.custom_season, self.custom_episode]) or 'skip_episode_group_check' in self.params: return
-			group_info = episode_groups_cache.get(self.tmdb_id)
-			if not group_info: return
-			group_details = metadata.group_episode_data(metadata.group_details(group_info['id']), self.episode_id, self.season, self.episode)
-			if group_details:
-				self.custom_season, self.custom_episode, self.episode_group_used = group_details['season'], group_details['episode'], True
-				self.episode_group_label = '[B]CUSTOM GROUP: S%02dE%02d[/B]' % (self.custom_season, self.custom_episode)
-		except: self.custom_season, self.custom_episode = None, None
-
-	def determine_scrapers_status(self):
-		self.active_internal_scrapers = settings.active_internal_scrapers()
-		if not 'external' in self.active_internal_scrapers and self.disabled_ext_ignored: self.active_internal_scrapers.append('external')
-		self.active_external = 'external' in self.active_internal_scrapers
-		if self.active_external:
-			self.debrid_enabled = debrid.debrid_enabled()
-			if not self.debrid_enabled: return self.disable_external('No Debrid Services Enabled')
-			self.ext_folder, self.ext_name = settings.external_scraper_info()
-			if not self.ext_folder or not self.ext_name: return self.disable_external('Error Importing External Module')
-
-	def get_sources(self):
-		if not self.progress_dialog and not self.background: self._make_progress_dialog()
-		results = []
-		if self.prescrape and any(x in self.active_internal_scrapers for x in self.default_internal_scrapers):
-			if self.prepare_internal_scrapers():
-				results = self.collect_prescrape_results()
-				if results: results = self.process_results(results)
-		if not results:
-			self.prescrape = False
-			self.prepare_internal_scrapers()
-			if self.active_external: self.activate_external_providers()
-			elif not self.active_internal_scrapers: self._kill_progress_dialog()
-			self.orig_results = self.collect_results()
-			if not self.orig_results and not self.active_external: self._kill_progress_dialog()
-			results = self.process_results(self.orig_results)
-		if not results: return self._process_post_results()
-		if self.autoscrape: return results
-		else: return self.play_source(results)
-
-	def collect_results(self):
-		self.sources.extend(self.prescrape_sources)
-		threads_append = self.threads.append
-		if self.active_folders: self.append_folder_scrapers(self.providers)
-		self.providers.extend(self.internal_sources())
-		if self.providers:
-			for i in self.providers: threads_append(Thread(target=self.activate_providers, args=(i[0], i[1], False), name=i[2]))
-			[i.start() for i in self.threads]
-		if self.active_external or self.background:
-			if self.active_external:
-				self.external_args = (self.meta, self.external_providers, self.debrid_enabled, self.external_cache_check, self.internal_scraper_names,
-										self.prescrape_sources, self.progress_dialog, self.disabled_ext_ignored)
-				self.activate_providers('external', external, False)
-			if self.background: [i.join() for i in self.threads]
-		elif self.active_internal_scrapers: self.scrapers_dialog()
-		return self.sources
-
-	def collect_prescrape_results(self):
-		threads_append = self.prescrape_threads.append
-		if self.active_folders:
-			if settings.check_prescrape_sources('folders', self.media_type):
-				self.append_folder_scrapers(self.prescrape_scrapers)
-				self.remove_scrapers.append('folders')
-		self.prescrape_scrapers.extend(self.internal_sources(True))
-		if not self.prescrape_scrapers: return []
-		for i in self.prescrape_scrapers: threads_append(Thread(target=self.activate_providers, args=(i[0], i[1], True), name=i[2]))
-		[i.start() for i in self.prescrape_threads]
-		self.remove_scrapers.extend(i[2] for i in self.prescrape_scrapers)
-		if self.background: [i.join() for i in self.prescrape_threads]
-		else: self.scrapers_dialog()
-		return self.prescrape_sources
-
-	def process_results(self, results):
-		results = self.sort_results(results)
-		self.uncached_results = [i for i in results if 'Uncached' in i.get('cache_provider', '')]
-		results = [i for i in results if not i in self.uncached_results]
-		if self.ignore_scrape_filters: self.filters_ignored = True
-		else:
-			results = self.filter_results(results)
-			results = self.filter_audio(results)
-			for file_type in self.filter_keys: results = self.special_filter(results, file_type)
-		results = self.sort_preferred_filters(results)
-		if self.prescrape:
-			self.all_scrapers = self.active_internal_scrapers
-			autoplay_results = [i for i in results if i['scrape_provider'] in self.active_internal_scrapers and settings.autoplay_prescrape(i['scrape_provider'])]
-			if autoplay_results:
-				self.autoplay = True
-				results = autoplay_results
-		else:
-			self.all_scrapers = list(set(self.active_internal_scrapers + self.remove_scrapers))
-			kodi_utils.clear_property('fs_filterless_search')
-		results = self.sort_first(results)
-		results = self.limit_quality_numbers(results)
-		results = self.limit_quality_total(results)
-		return results
-
-	def sort_results(self, results):
-		results = [dict(i, **{
-			'provider_rank': self._get_provider_rank(i['debrid'].lower()), 'quality_rank': self._get_quality_rank(i.get('quality', 'SD')),
-			'size_rank': self._get_size_rank(i)}) for i in results]
-		results.sort(key=self.sort_function)
-		results = self._sort_uncached_results(results)
-		return results
-
-	def filter_results(self, results):
-		if self.folders_ignore_filters:
-			folder_results = [i for i in results if i['scrape_provider'] == 'folders']
-			results = [i for i in results if not i in folder_results]
-		else: folder_results = []
-		results = [i for i in results if i['quality'] in self.quality_filter]
-		if self.filter_size_method:
-			min_size = string_to_float(get_setting('morbius.results.%s_size_min' % self.media_type, '0'), '0') / 1000
-			if min_size == 0.0 and not self.include_unknown_size: min_size = 0.02
-			if self.filter_size_method == 1:
-				duration = self.meta['duration'] or (5400 if self.media_type == 'movie' else 2400)
-				max_size = ((0.125 * (0.90 * string_to_float(get_setting('results.line_speed', '25'), '25'))) * duration)/1000
-			elif self.filter_size_method == 2:
-				max_size = string_to_float(get_setting('morbius.results.%s_size_max' % self.media_type, '10000'), '10000') / 1000
-			results = [i for i in results if i['scrape_provider'] == 'folders' or min_size <= i['size'] <= max_size]
-		results += folder_results
-		return results
-
-	def filter_audio(self, results):
-		a_filters = settings.audio_filters()
-		return [i for i in results if not any(x in i['extraInfo'] for x in a_filters)]
-
-	def special_filter(self, results, file_type):
-		enable_setting, key = settings.filter_status(file_type), self.filter_keys[file_type]
-		if key == 'HEVC' and enable_setting == 0:
-			hevc_max_quality = self._get_quality_rank(get_setting('morbius.filter.hevc.%s' % ('max_autoplay_quality' if self.autoplay else 'max_quality'), '4K'))
-			results = [i for i in results if not key in i['extraInfo'] or i['quality_rank'] >= hevc_max_quality]
-		if enable_setting == 1:
-			if key in ('D/VISION', 'HDR'):
-				if not settings.filter_status({'D/VISION': 'hdr', 'HDR': 'dv'}[key]) == 0: results = [i for i in results if not key in i['extraInfo']]
-				else: results = [i for i in results if not (key in i['extraInfo'] and not 'HYBRID' in i['extraInfo'])]
-			else: results = [i for i in results if not key in i['extraInfo']]
-		return results
-
-	def sort_preferred_filters(self, results):
-		if settings.sort_to_top_filter(self.autoplay):
-			try:
-				preferences = settings.preferred_filters()
-				if not preferences: return results
-				preferences = [self.filter_keys.get(i.lower(), i) for i in preferences]
-				preference_results = [i for i in results if any(x in i['extraInfo'] for x in preferences)]
-				if not preference_results: return results
-				results = [i for i in results if not i in preference_results]
-				preference_results = sorted([dict(item, **{'pref_includes': sum([{0:100, 1:50, 2:20, 3:10, 4:5, 5:2}[preferences.index(x)] \
-					for x in [i for i in preferences if i in item['extraInfo']]])}) for item in preference_results], key=lambda k: k['pref_includes'], reverse=True)
-				return preference_results + results
-			except: pass
-		return results
-
-	def sort_first(self, results):
-		try:
-			sort_first_scrapers = []
-			if 'folders' in self.all_scrapers and settings.sort_to_top('folders'): sort_first_scrapers.append('folders')
-			sort_first_scrapers.extend([i for i in self.all_scrapers if i in ('rd_cloud', 'pm_cloud', 'ad_cloud', 'oc_cloud', 'tb_cloud') and settings.sort_to_top(i)])
-			if not sort_first_scrapers: return results
-			sort_first = [i for i in results if i['scrape_provider'] in sort_first_scrapers]
-			sort_first.sort(key=lambda k: (self._sort_folder_to_top(k['scrape_provider']), k['quality_rank']))
-			sort_last = [i for i in results if not i in sort_first]
-			results = sort_first + sort_last
-		except: pass
-		return results
-
-	def limit_quality_numbers(self, results):
-		if self.autoplay or self.ignore_scrape_filters: return results
-		quality_limit = settings.limit_number_quality()
-		if not quality_limit: return results
-		quality_counter_dict, limit_list = {'4K': 0, '1080p': 0, '720p': 0, 'SD': 0, 'SCR': 0, 'CAM': 0, 'TELE': 0}, []
-		for i in results:
-			if quality_counter_dict[i['quality']] < quality_limit:
-				quality_counter_dict[i['quality']] += 1
-				limit_list.append(i)
-		return limit_list
-
-	def limit_quality_total(self, results):
-		if self.autoplay or self.ignore_scrape_filters: return results
-		total_limit = settings.limit_number_total()
-		if not total_limit: return results
-		return results[:total_limit]
-
-	def prepare_internal_scrapers(self):
-		if self.active_external and len(self.active_internal_scrapers) == 1: return
-		active_internal_scrapers = [i for i in self.active_internal_scrapers if not i in self.remove_scrapers]
-		if self.prescrape and not self.active_external and all([settings.check_prescrape_sources(i, self.media_type) for i in active_internal_scrapers]): return False
-		if 'folders' in active_internal_scrapers:
-			folder_info = self.get_folderscraper_info()
-			self.folder_info = [i for i in folder_info if settings.source_folders_directory(self.media_type, i[1])]
-			if self.folder_info:
-				self.active_folders = True
-				self.internal_scraper_names = [i for i in active_internal_scrapers if not i == 'folders'] + [i[0] for i in self.folder_info]
-			else: self.internal_scraper_names = [i for i in active_internal_scrapers if not i == 'folders']
-		else:
-			self.folder_info = []
-			self.internal_scraper_names = active_internal_scrapers[:]
-		self.active_internal_scrapers = active_internal_scrapers
-		if self.clear_properties: self._clear_properties()
-		return True
-
-	def activate_providers(self, module_type, function, prescrape):
-		sources = self._get_module(module_type, function).results(self.search_info)
-		if not sources: return
-		if prescrape: self.prescrape_sources.extend(sources)
-		else: self.sources.extend(sources)
-
-	def activate_external_providers(self):
-		self.external_providers = self.external_sources()
-		if not self.external_providers: self.disable_external('No External Providers Enabled')
-
-	def disable_external(self, line1=''):
-		if line1: kodi_utils.notification(line1, 2000)
-		try: self.active_internal_scrapers.remove('external')
-		except: pass
-		self.active_external, self.external_providers = False, []
-
-	def internal_sources(self, prescrape=False):
-		active_sources = [i for i in self.active_internal_scrapers if i in ['easynews', 'rd_cloud', 'pm_cloud', 'ad_cloud', 'oc_cloud', 'tb_cloud']]
-		try: sourceDict = [('internal', manual_function_import('scrapers.%s' % i, 'source'), i) for i in active_sources \
-												if not (prescrape and not settings.check_prescrape_sources(i, self.media_type))]
-		except: sourceDict = []
-		return sourceDict
-
-	def external_sources(self):
-		append_module_to_syspath('special://home/addons/%s/lib' % self.ext_folder)
-		try: sourceDict = self.filter_external_sources(manual_function_import(self.ext_name, 'sources')(specified_folders=['torrents'], ret_all=self.disabled_ext_ignored))
-		except: sourceDict = []
-		return sourceDict
-
-	def filter_external_sources(self, sourceDict):
-		if settings.external_filter_sources() and any([self.disabled_ext_ignored, len(sourceDict) <= 5]): return sourceDict
-		sourceDict.sort(key=lambda k: k[1].priority)
-		sourceDict = sourceDict[:5]
-		return sourceDict
-
-	def folder_sources(self):
-		def import_info():
-			for item in self.folder_info:
-				scraper_name = item[0]
-				module = manual_function_import('scrapers.folders', 'source')
-				yield ('folders', (module, (item[1], scraper_name, item[2])), scraper_name)
-		sourceDict = list(import_info())
-		try: sourceDict = list(import_info())
-		except: sourceDict = []
-		return sourceDict
-
-	def play_source(self, results):
-		if self.background or self.autoplay: return self.play_file(results)
-		return self.display_results(results)
-
-	def append_folder_scrapers(self, current_list):
-		current_list.extend(self.folder_sources())
-
-	def get_folderscraper_info(self):
-		folder_info = [(get_setting('morbius.%s.display_name' % i), i, settings.source_folders_directory(self.media_type, i))
-						for i in ('folder1', 'folder2', 'folder3', 'folder4', 'folder5')]
-		return [i for i in folder_info if not i[0] in (None, 'None', '') and i[2]]
-
-	def scrapers_dialog(self):
-		def _scraperDialog():
-			monitor = kodi_utils.kodi_monitor()
-			start_time = time.time()
-			while not self.progress_dialog.iscanceled() and not monitor.abortRequested():
-				try:
-					remaining_providers = [x.getName() for x in _threads if x.is_alive() is True]
-					self._process_internal_results()
-					current_progress = max((time.time() - start_time), 0)
-					line1 = ', '.join(remaining_providers).upper()
-					percent = int((current_progress/float(25))*100)
-					self.progress_dialog.update_scraper(self.sources_sd, self.sources_720p, self.sources_1080p, self.sources_4k, self.sources_total, line1, percent)
-					kodi_utils.sleep(self.sleep_time)
-					if len(remaining_providers) == 0: break
-					if percent >= 100: break
-				except:	return self._kill_progress_dialog()
-		if self.prescrape: scraper_list, _threads = self.prescrape_scrapers, self.prescrape_threads
-		else: scraper_list, _threads = self.providers, self.threads
-		self.internal_scrapers = self._get_active_scraper_names(scraper_list)
-		if not self.internal_scrapers: return
-		_scraperDialog()
-		try: del monitor
-		except: pass
-
-	def display_results(self, results):
-		window_format, window_number = settings.results_format()
-		action, chosen_item = open_window(('windows.sources', 'SourcesResults'), 'sources_results.xml',
-				window_format=window_format, window_id=window_number, results=results, meta=self.meta, episode_group_label=self.episode_group_label,
-				scraper_settings=self.scraper_settings, prescrape=self.prescrape, filters_ignored=self.filters_ignored,
-				uncached_results=self.uncached_results, external_cache_check=self.external_cache_check)
-		if not action: self._kill_progress_dialog()
-		elif action == 'play': return self.play_file(results, chosen_item)
-		elif self.prescrape and action == 'perform_full_search':
-			self.prescrape, self.clear_properties = False, False
-			return self.get_sources()
-		elif action == 'cache_change_rescrape':
-			self.external_cache_check = chosen_item == 'true'
-			self.sources, self.orig_results, self.threads = [], [], []
-			self.prescrape, self.clear_properties = False, False
-			return self.get_sources()
-
-	def _get_active_scraper_names(self, scraper_list):
-		return [i[2] for i in scraper_list]
-
-	def _process_post_results(self):
-		if self.auto_rescrape_cache_ignored in (1, 2) and self.active_external and self.orig_results and self.external_cache_check \
-											and debrid.debrid_for_ext_cache_check(self.debrid_enabled) and not self.rescrape_cache_ignored:
-			self.rescrape_cache_ignored = True
-			if self.auto_rescrape_cache_ignored == 1 or kodi_utils.confirm_dialog(heading=self.meta.get('rootname', ''), text='No results.[CR]Retry With Cache Check Disabled?'):
-				self.threads, self.prescrape, self.external_cache_check = [], False, False
-				return self.get_sources()
-		if self.auto_rescrape_imdb_year in (1, 2) and self.active_external and not self.orig_results and not self.original_year_ignored and not self.meta.get('custom_year'):
-			self.original_year_ignored = True
-			if self.auto_rescrape_imdb_year == 1 or kodi_utils.confirm_dialog(heading=self.meta.get('rootname', ''), text='No results.[CR]Retry With IMDb Year Data?'):
-				from apis.imdb_api import imdb_year_check
-				imdb_year = str(imdb_year_check(self.meta.get('imdb_id')))
-				if imdb_year != self.get_search_year():
-					self.meta['custom_year'] = imdb_year
-					self.make_search_info()
-					self.threads, self.prescrape = [], False
-					return self.get_sources()
-		if self.auto_rescrape_with_all in (1, 2) and self.active_external and not self.rescrape_with_all:
-			self.rescrape_with_all = True
-			if self.auto_rescrape_with_all == 1 or kodi_utils.confirm_dialog(heading=self.meta.get('rootname', ''), text='No results.[CR]Retry With All Scrapers?'):
-				self.threads, self.disabled_ext_ignored, self.prescrape = [], True, False
-				return self.get_sources()
-		if self.media_type == 'episode' and self.auto_episode_group in (1, 2) and not self.rescrape_with_episode_group:
-			self.rescrape_with_episode_group = True
-			if self.auto_episode_group == 1 or kodi_utils.confirm_dialog(heading=self.meta.get('rootname', ''), text='No results.[CR]Retry With Custom Episode Group if Possible?'):
-				if self.episode_group_used:
-					self.params.update({'custom_season': None, 'custom_episode': None, 'episode_group_label': '[B]CUSTOM GROUP: S%02dE%02d[/B]' % (self.season, self.episode),
-										'skip_episode_group_check': True})
-					self.threads, self.rescrape_with_all, self.disabled_ext_ignored, self.prescrape = [], True, True, False
-					return self.playback_prep()
-				if self.auto_episode_group == 2:
-					from indexers.dialogs import episode_groups_choice
-					try: group_id = episode_groups_choice({'meta': self.meta, 'poster': self.meta['poster']})
-					except: group_id = None
-				else:
-					try: group_id = metadata.episode_groups(self.tmdb_id)[0]['id']
-					except: group_id = None
-				if group_id:
-					try: group_details = metadata.group_episode_data(metadata.group_details(group_id), None, self.season, self.episode)
-					except: group_details = None
-					if group_details:
-						season, episode = group_details['season'], group_details['episode']
-						self.params.update({'custom_season': season, 'custom_episode': episode, 'episode_group_label': '[B]CUSTOM GROUP: S%02dE%02d[/B]' % (season, episode)})
-						self.threads, self.rescrape_with_all, self.disabled_ext_ignored, self.prescrape = [], True, True, False
-						return self.playback_prep()
-		if self.orig_results and not self.background:
-			if self.ignore_results_filter == 0: return self._no_results()
-			if self.ignore_results_filter == 1 or kodi_utils.confirm_dialog(heading=self.meta.get('rootname', ''), text='No results. Access Filtered Results?'):
-				return self._process_ignore_filters()
-		return self._no_results()
-
-	def _process_ignore_filters(self):
-		if self.autoplay: kodi_utils.notification('Filters Ignored & Autoplay Disabled')
-		self.filters_ignored, self.autoplay = True, False
-		results = self.sort_results(self.orig_results)
-		results = self.sort_preferred_filters(results)
-		results = self.sort_first(results)
-		return self.play_source(results)
-
-	def _no_results(self):
-		self._kill_progress_dialog()
-		kodi_utils.hide_busy_dialog()
-		if self.background: return kodi_utils.notification('[B]Next Up:[/B] No Results', 5000)
-		kodi_utils.notification('No Results', 2000)
-
-	def get_search_title(self):
-		search_title = self.meta.get('custom_title', None) or self.meta.get('english_title') or self.meta.get('title')
-		return search_title
-
-	def get_search_year(self):
-		year = self.meta.get('custom_year', None) or self.meta.get('year')
-		return year
-
-	def get_season(self):
-		season = self.meta.get('custom_season', None) or self.meta.get('season')
-		try: season = int(season)
-		except: season = None
-		return season
-
-	def get_episode(self):
-		episode = self.meta.get('custom_episode', None) or self.meta.get('episode')
-		try: episode = int(episode)
-		except: episode = None
-		return episode
-
-	def get_ep_name(self):
-		ep_name = None
-		if self.meta['media_type'] == 'episode':
-			ep_name = self.meta.get('ep_name')
-			try: ep_name = safe_string(remove_accents(ep_name))
-			except: ep_name = safe_string(ep_name)
-		return ep_name
-
-	def _process_internal_results(self):
-		for i in self.internal_scrapers:
-			win_property = kodi_utils.get_property('morbius.internal_results.%s' % i)
-			if win_property in ('checked', '', None): continue
-			try: sources = json.loads(win_property)
-			except: continue
-			kodi_utils.set_property('morbius.internal_results.%s' % i, 'checked')
-			self._sources_quality_count(sources)
-	
-	def _sources_quality_count(self, sources):
-		for item in self.count_tuple: setattr(self, item[0], getattr(self, item[0]) + item[2](sources, item[1]))
-
-	def _quality_filter(self):
-		setting = 'results_quality_%s' % self.media_type if not self.autoplay else 'autoplay_quality_%s' % self.media_type
-		filter_list = settings.quality_filter(setting)
-		if self.include_prerelease_results and 'SD' in filter_list: filter_list += ['SCR', 'CAM', 'TELE']
-		return filter_list
-
-	def _get_size_rank(self, item):
-		if self.weight_size: return item['size'] * 2 if 'HEVC' in item['extraInfo'] else item['size']
-		else: return item['size']
-
-	def _get_quality_rank(self, quality):
-		return {'4K': 1, '1080p': 2, '720p': 3, 'SD': 4, 'SCR': 5, 'CAM': 5, 'TELE': 5}[quality]
-
-	def _get_provider_rank(self, account_type):
-		return self.provider_sort_ranks[account_type] or 11
-
-	def _sort_folder_to_top(self, provider):
-		if provider == 'folders': return 0
-		else: return 1
-
-	def _sort_uncached_results(self, results):
-		uncached = [i for i in results if 'Uncached' in i.get('cache_provider', '')]
-		cached = [i for i in results if not i in uncached]
-		return cached + uncached
-
-	def get_meta(self):
-		if self.media_type == 'movie': self.meta = metadata.movie_meta('tmdb_id', self.tmdb_id, settings.tmdb_api_key(), settings.mpaa_region(), get_datetime())
-		else:
-			try:
-				self.meta = metadata.tvshow_meta('tmdb_id', self.tmdb_id, settings.tmdb_api_key(), settings.mpaa_region(), get_datetime())
-				episodes_data = metadata.episodes_meta(self.season, self.meta)
-				episode_data = [i for i in episodes_data if i['episode'] == self.episode][0]
-				ep_thumb = episode_data.get('thumb', None) or self.meta.get('fanart') or ''
-				episode_type = episode_data.get('episode_type', '')
-				self.meta.update({'season': episode_data['season'], 'episode': episode_data['episode'], 'premiered': episode_data['premiered'], 'episode_type': episode_type,
-								'ep_name': episode_data['title'], 'ep_thumb': ep_thumb, 'plot': episode_data['plot'], 'tvshow_plot': self.meta['plot'],
-								'custom_season': self.custom_season, 'custom_episode': self.custom_episode})
-			except: pass
-		self.meta.update({'media_type': self.media_type, 'background': self.background, 'custom_title': self.custom_title, 'custom_year': self.custom_year})
-
-	def make_search_info(self):
-		title, year, ep_name = self.get_search_title(), self.get_search_year(), self.get_ep_name()
-		aliases = make_alias_dict(self.meta, title)
-		expiry_times = get_cache_expiry(self.media_type, self.meta, self.season)
-		self.search_info = {'media_type': self.media_type, 'title': title, 'year': year, 'tmdb_id': self.tmdb_id, 'imdb_id': self.meta.get('imdb_id'), 'aliases': aliases,
-							'season': self.get_season(), 'episode': self.get_episode(), 'tvdb_id': self.meta.get('tvdb_id'), 'ep_name': ep_name, 'expiry_times': expiry_times,
-							'total_seasons': self.meta.get('total_seasons', 1)}
-
-	def _get_module(self, module_type, function):
-		if module_type == 'external': module = function.source(*self.external_args)
-		elif module_type == 'folders': module = function[0](*function[1])
-		else: module = function()
-		return module
-
-	def _clear_properties(self):
-		def_internal = self.default_internal_scrapers
-		for item in def_internal: kodi_utils.clear_property('morbius.internal_results.%s' % item)
-		if self.active_folders:
-			for item in self.folder_info: kodi_utils.clear_property('morbius.internal_results.%s' % item[0])
-
-	def _make_progress_dialog(self):
-		self.progress_dialog = create_window(('windows.sources', 'SourcesPlayback'), 'sources_playback.xml', meta=self.meta)
-		self.progress_thread = Thread(target=self.progress_dialog.run)
-		self.progress_thread.start()
-
-	def _make_resolve_dialog(self):
-		self.resolve_dialog_made = True
-		if not self.progress_dialog: self._make_progress_dialog()
-		self.progress_dialog.enable_resolver()
-
-	def _make_resume_dialog(self, percent):
-		if not self.progress_dialog: self._make_progress_dialog()
-		self.progress_dialog.enable_resume(percent)
-		return self.progress_dialog.resume_choice
-
-	def _make_nextep_dialog(self, default_action='cancel'):
-		try: action = open_window(('windows.playback_notifications', 'NextEpisode'), 'playback_notifications.xml', meta=self.meta, default_action=default_action)
-		except: action = 'cancel'
-		return action
-
-	def _kill_progress_dialog(self):
-		success = 0
-		try:
-			self.progress_dialog.close()
-			success += 1
-		except: pass
-		try:
-			self.progress_thread.join()
-			success += 1
-		except: pass
-		if not success == 2: kodi_utils.close_all_dialog()
-		del self.progress_dialog
-		del self.progress_thread
-		self.progress_dialog, self.progress_thread = None, None
-
-	def debridPacks(self, debrid_provider, name, magnet_url, info_hash, download=False):
-		kodi_utils.show_busy_dialog()
-		debrid_info = {'Real-Debrid': 'rd_browse', 'Premiumize.me': 'pm_browse', 'AllDebrid': 'ad_browse',
-						'Offcloud': 'oc_browse', 'EasyDebrid': 'ed_browse', 'TorBox': 'tb_browse'}[debrid_provider]
-		debrid_function = self.debrid_importer(debrid_info)
-		try: debrid_files = debrid_function().display_magnet_pack(magnet_url, info_hash)
-		except: debrid_files = None
-		kodi_utils.hide_busy_dialog()
-		if not debrid_files: return kodi_utils.notification('Error')
-		debrid_files.sort(key=lambda k: k['filename'].lower())
-		if download: return debrid_files, debrid_function
-		list_items = [{'line1': '%.2f GB | %s' % (float(item['size'])/1073741824, clean_file_name(item['filename']).upper())} for item in debrid_files]
-		kwargs = {'items': json.dumps(list_items), 'heading': name, 'enumerate': 'true', 'narrow_window': 'true'}
-		chosen_result = kodi_utils.select_dialog(debrid_files, **kwargs)
-		if chosen_result is None: return None
-		link = self.resolve_internal(debrid_info, chosen_result['link'], '')
-		name = chosen_result['filename']
-		self._kill_progress_dialog()
-		return morbiusPlayer().run(link, 'video')
-
-	def play_file(self, results, source={}):
-		self.playback_successful, self.cancel_all_playback = None, False
-		retry_easynews = settings.easynews_playback_method('retry')
-		try:
-			kodi_utils.hide_busy_dialog()
-			url = None
-			results = [i for i in results if not 'Uncached' in i.get('cache_provider', '')]
-			if not source: source = results[0]
-			items = [source]
-			if not self.limit_resolve: 
-				source_index = results.index(source)
-				results.remove(source)
-				items_prev = results[:source_index]
-				items_prev.reverse()
-				items_next = results[source_index:]
-				items = items + items_next + items_prev
-			processed_items = []
-			processed_items_append = processed_items.append
-			for count, item in enumerate(items, 1):
-				resolve_item = dict(item)
-				provider = item['scrape_provider']
-				if provider == 'external': provider = item['debrid'].replace('.me', '')
-				elif provider == 'folders': provider = item['source']
-				provider_text = provider.upper()
-				extra_info = '[B]%s[/B] | [B]%s[/B] | %s' %  (item['quality'], item['size_label'], item['extraInfo'])
-				display_name = item['display_name'].upper()
-				resolve_item['resolve_display'] = '%02d. [B]%s[/B][CR]%s[CR]%s' % (count, provider_text, extra_info, display_name)
-				processed_items_append(resolve_item)
-				if provider == 'easynews' and retry_easynews:
-					for retry in range(1, 2):
-						resolve_item = dict(item)
-						resolve_item['resolve_display'] = '%02d. [B]%s (RETRYx%s)[/B][CR]%s[CR]%s' % (count, provider_text, retry, extra_info, display_name)
-						processed_items_append(resolve_item)
-			items = list(processed_items)
-			if not self.continue_resolve_check(): return self._kill_progress_dialog()
-			kodi_utils.hide_busy_dialog()
-			self.playback_percent = self.get_playback_percent()
-			if self.playback_percent == None: return self._kill_progress_dialog()
-			if not self.resolve_dialog_made: self._make_resolve_dialog()
-			if self.background: kodi_utils.sleep(1000)
-			monitor = kodi_utils.kodi_monitor()
-			for count, item in enumerate(items, 1):
-				try:
-					kodi_utils.hide_busy_dialog()
-					if not self.progress_dialog: break
-					self.progress_dialog.reset_is_cancelled()
-					self.progress_dialog.update_resolver(text=item['resolve_display'])
-					self.progress_dialog.busy_spinner()
-					if count > 1:
-						kodi_utils.sleep(200)
-						try: del player
-						except: pass
-					url, self.playback_successful, self.cancel_all_playback = None, None, False
-					self.playing_filename = item['name']
-					self.playing_item = item
-					player = morbiusPlayer()
-					try:
-						if self.progress_dialog.iscanceled() or monitor.abortRequested(): break
-						url = self.resolve_sources(item)
-						if url:
-							resolve_percent = 0
-							self.progress_dialog.busy_spinner('false')
-							self.progress_dialog.update_resolver(percent=resolve_percent)
-							kodi_utils.sleep(200)
-							player.run(url, self)
-						else: continue
-						if self.cancel_all_playback: break
-						if self.playback_successful: break
-						if count == len(items):
-							self.cancel_all_playback = True
-							player.stop()
-							break
-					except: pass
-				except: pass
-		except: self._kill_progress_dialog()
-		if self.cancel_all_playback: return self._kill_progress_dialog()
-		if not self.playback_successful or not url: self.playback_failed_action()
-		try: del monitor
-		except: pass
-
-	def get_playback_percent(self):
-		if self.media_type == 'movie': percent = watched_status.get_progress_status_movie(watched_status.get_bookmarks_movie(), str(self.tmdb_id))
-		elif any((self.random, self.random_continual)): return 0.0
-		else: percent = watched_status.get_progress_status_episode(watched_status.get_bookmarks_episode(self.tmdb_id, self.season), self.episode)
-		if not percent: return 0.0
-		action = self.get_resume_status(percent)
-		if action == 'cancel': return None
-		if action == 'start_over':
-			watched_status.erase_bookmark(self.media_type, self.tmdb_id, self.season, self.episode)
-			return 0.0
-		return float(percent)
-
-	def get_resume_status(self, percent):
-		if settings.auto_resume(self.media_type, self.autoplay): return float(percent)
-		return self._make_resume_dialog(percent)
-
-	def playback_failed_action(self):
-		self._kill_progress_dialog()
-		if self.prescrape and self.autoplay:
-			self.resolve_dialog_made, self.prescrape, self.prescrape_sources = False, False, []
-			self.get_sources()
-
-	def continue_resolve_check(self):
-		try:
-			if not self.background or self.autoscrape_nextep: return True
-			if self.autoplay_nextep: return self.autoplay_nextep_handler()
-			return self.random_continual_handler()
-		except: return False
-
-	def random_continual_handler(self):
-		kodi_utils.notification('[B]Next Up:[/B] %s S%02dE%02d' % (self.meta.get('title'), self.meta.get('season'), self.meta.get('episode')), 6500, self.meta.get('poster'))
-		player = kodi_utils.kodi_player()
-		while player.isPlayingVideo(): kodi_utils.sleep(100)
-		self._make_resolve_dialog()
-		return True
-
-	def autoplay_nextep_handler(self):
-		if not self.nextep_settings: return False
-		player = kodi_utils.kodi_player()
-		if player.isPlayingVideo():
-			total_time = player.getTotalTime()
-			use_window, window_time, default_action = self.nextep_settings['use_window'], self.nextep_settings['window_time'], self.nextep_settings['default_action']
-			action = None if use_window else 'close'
-			continue_nextep = False
-			while player.isPlayingVideo():
-				try:
-					remaining_time = round(total_time - player.getTime())
-					if remaining_time <= window_time:
-						continue_nextep = True
-						break
-					kodi_utils.sleep(100)
-				except: pass
-			if continue_nextep:
-				if use_window: action = self._make_nextep_dialog(default_action=default_action)
-				else: kodi_utils.notification('[B]Next Up:[/B] %s S%02dE%02d' \
-						% (self.meta.get('title'), self.meta.get('season'), self.meta.get('episode')), 6500, self.meta.get('poster'))
-				if not action: action = default_action
-				if action == 'cancel': return False
-				elif action == 'pause':
-					player.stop()
-					return False
-				elif action == 'play':
-					self._make_resolve_dialog()
-					player.stop()
-					return True
-				else:
-					while player.isPlayingVideo(): kodi_utils.sleep(100)
-					self._make_resolve_dialog()
-					return True
-			else: return False
-		else: return False
-
-	def autoscrape_nextep_handler(self):
-		player = kodi_utils.kodi_player()
-		if player.isPlayingVideo():
-			results = self.get_sources()
-			if not results: return kodi_utils.notification(33092, 3000)
-			else:
-				kodi_utils.notification('[B]Next Episode Ready:[/B] %s S%02dE%02d' \
-						% (self.meta.get('title'), self.meta.get('season'), self.meta.get('episode')), 6500, self.meta.get('poster'))
-				while player.isPlayingVideo(): kodi_utils.sleep(100)
-			self.display_results(results)
-		else: return
-
-	def debrid_importer(self, debrid_provider):
-		return manual_function_import(*self.debrids[debrid_provider])
-
-	def resolve_sources(self, item, meta=None):
-		if meta: self.meta = meta
-		url = None
-		try:
-			if 'cache_provider' in item:
-				cache_provider = item['cache_provider']
-				if self.meta['media_type'] == 'episode':
-					if hasattr(self, 'search_info'):
-						title, season, episode, pack = self.search_info['title'], self.search_info['season'], self.search_info['episode'], 'package' in item
-					else: title, season, episode, pack = self.get_ep_name(), self.get_season(), self.get_episode(), 'package' in item
-				else: title, season, episode, pack = self.get_search_title(), None, None, False
-				if cache_provider in ('Real-Debrid', 'Premiumize.me', 'AllDebrid', 'Offcloud', 'EasyDebrid', 'TorBox'):
-					url = self.resolve_cached(cache_provider, item['url'], item['hash'], title, season, episode, pack)
-			elif item.get('scrape_provider', None) in self.default_internal_scrapers:
-				url = self.resolve_internal(item['scrape_provider'], item['id'], item['url_dl'], item.get('direct_debrid_link', False))
-			else: url = item['url']
-		except: pass
-		return url
-
-	def resolve_cached(self, debrid_provider, item_url, _hash, title, season, episode, pack):
-		debrid_function = self.debrid_importer(debrid_provider)
-		store_to_cloud = settings.store_resolved_to_cloud(debrid_provider, pack)
-		try: url = debrid_function().resolve_magnet(item_url, _hash, store_to_cloud, title, season, episode)
-		except: url = None
-		return url
-
-	def resolve_internal(self, scrape_provider, item_id, url_dl, direct_debrid_link=False):
-		url = None
-		try:
-			if direct_debrid_link or scrape_provider == 'folders': url = url_dl
-			elif scrape_provider == 'easynews':
-				from indexers.easynews import resolve_easynews
-				url = resolve_easynews({'url_dl': url_dl, 'play': 'false'})
-			else:
-				debrid_function = self.debrid_importer(scrape_provider)
-				if any(i in scrape_provider for i in ('rd_', 'ad_', 'tb_')):
-					url = debrid_function().unrestrict_link(item_id)
-				else:
-					if '_cloud' in scrape_provider: item_id = debrid_function().get_item_details(item_id)['link']
-					url = debrid_function().add_headers_to_url(item_id)
-		except: pass
-		return url
-
-	def _quality_length(self, items, quality):
-		return len([i for i in items if i['quality'] == quality])
-
-	def _quality_length_sd(self, items, dummy):
-		return len([i for i in items if i['quality'] in ('SD', 'CAM', 'TELE', 'SYNC')])
-
-	def _quality_length_final(self, items, dummy):
-		return len(items)
+import datetime
+import random
+
+import simplejson as json
+import six
+from six.moves import urllib_parse, zip, reduce
+
+from resources.lib.modules import client
+from resources.lib.modules import cleantitle
+from resources.lib.modules import control
+from resources.lib.modules import source_utils
+from resources.lib.modules import scrape_sources
+from resources.lib.modules import trakt
+from resources.lib.modules import workers
+from resources.lib.modules import log_utils
+
+try:
+    from sqlite3 import dbapi2 as database
+except:
+    from pysqlite2 import dbapi2 as database
+try:
+    import resolveurl
+except:
+    pass
+
+
+class sources:
+    def __init__(self):
+        self.getConstants()
+        self.sources = []
+        self.filtered_sources = []
+
+
+    def errorForSources(self):
+        log_utils.log('errorForSources exception', 1)
+        control.infoDialog('Error : No Stream Available.', sound=False, icon='INFO')
+
+
+    def getConstants(self):
+        self.itemProperty = 'plugin.video.scrubsv2.container.items'
+        self.metaProperty = 'plugin.video.scrubsv2.container.meta'
+        self.sourceFile = control.providercacheFile
+        from resources.lib.sources import sources
+        self.sourceDict = sources()
+        self.hostDict = self.getHostDict()
+        self.hostcapDict = ['flashx.tv', 'flashx.to', 'uptobox.com', 'uptostream.com']
+        self.hostblockDict = ['aparat.cam', 'clipwatching.com', 'dailyuploads.net', 'estream.to', 'fruitadblock.net',
+            'highstream.tv', 'hqq.to', 'hydrax.net', 'hydrax.xyz', 'netu.tv', 'openload.co', 'speedvid.net',
+            'streamango.com', 'streamcherry.com', 'subscene.com', 'supervideo.tv', 'verystream.com', 'vidlox.me',
+            'vidtodoo.com', 'vshare.eu', 'vshare.io', 'wolfstream.tv', 'youtube.com', 'youtu.be', 'youtube-nocookie.com'
+        ]
+        self.hostDict = [x for x in self.hostDict if not x in self.hostblockDict]
+
+
+    def getHostDict(self):
+        try:
+            hostDict = resolveurl.relevant_resolvers(order_matters=True)
+            hostDict = [i.domains for i in hostDict if not '*' in i.domains]
+            hostDict = [i.lower() for i in reduce(lambda x, y: x + y, hostDict)]
+            hostDict = [x for y, x in enumerate(hostDict) if x not in hostDict[:y]]
+            return hostDict
+        except:
+            log_utils.log('getHostDict', 1)
+            return []
+
+
+    def sourcesResolve(self, item, info=False):
+        try:
+            self.url = None
+            u = url = item['url']
+            direct = item['direct']
+            local = item.get('local', False)
+            provider = item['provider']
+            call = [i[1] for i in self.sourceDict if i[0] == provider][0]
+            u = url = call.resolve(url)
+            u = url = scrape_sources.prepare_link(url)
+            if url == None or (not '://' in url and not local):
+                raise Exception()
+            if not local:
+                url = url[8:] if url.startswith('stack:') else url
+                urls = []
+                for part in url.split(' , '):
+                    u = part
+                    if not direct == True:
+                        if control.setting('resolve.dbird') == 'true':
+                            hmf = resolveurl.HostedMediaFile(url=u, include_disabled=True, include_universal=True)
+                        else:
+                            hmf = resolveurl.HostedMediaFile(url=u, include_disabled=True, include_universal=False)
+                        if hmf.valid_url() == True:
+                            part = hmf.resolve()
+                    urls.append(part)
+                url = 'stack://' + ' , '.join(urls) if len(urls) > 1 else urls[0]
+            if url == False or url == None:
+                raise Exception()
+            ext = url.split('?')[0].split('&')[0].split('|')[0].rsplit('.')[-1].replace('/', '').lower()
+            if ext == 'rar':
+                raise Exception()
+            try:
+                headers = url.rsplit('|', 1)[1]
+            except:
+                headers = ''
+            headers = urllib_parse.quote_plus(headers).replace('%3D', '=') if ' ' in headers else headers
+            headers = dict(urllib_parse.parse_qsl(headers))
+            if url.startswith('http') and '.m3u8' in url:
+                try:
+                    result = client.request(url.split('|')[0], headers=headers, output='geturl', timeout='10')
+                except:
+                    pass
+            elif url.startswith('http'):
+                try:
+                    result = client.request(url.split('|')[0], headers=headers, output='chunk', timeout='10')
+                except:
+                    pass
+            self.url = url
+            return url
+        except:
+            #log_utils.log('Resolve failure for url: {}'.format(item['url']), 1)
+            if info == True:
+                self.errorForSources()
+            return
+
+
+    def sourcesDialog(self, items):
+        try:
+            labels = [i['label'] for i in items]
+            select = control.selectDialog(labels)
+            if select == -1:
+                return 'close://'
+            next = [y for x,y in enumerate(items) if x >= select]
+            prev = [y for x,y in enumerate(items) if x < select][::-1]
+            items = [items[select]]
+            items = [i for i in items + next + prev][:40]
+            header = control.addonInfo('name') + ': Resolving...'
+            progressDialog = control.progressDialog if control.setting('progress.dialog') == '0' else control.progressDialogBG
+            progressDialog.create(header, '')
+            #progressDialog.update(0)
+            block = None
+            for i in range(len(items)):
+                try:
+                    if items[i]['source'] == block:
+                        raise Exception()
+                    w = workers.Thread(self.sourcesResolve, items[i])
+                    w.start()
+                    label = re.sub(' {2,}', ' ', str(items[i]['label']))
+                    try:
+                        if progressDialog.iscanceled():
+                            break
+                        progressDialog.update(int((100 / float(len(items))) * i), label)
+                    except:
+                        progressDialog.update(int((100 / float(len(items))) * i), str(header) + '[CR]' + label)
+                    offset = 60 * 2 if items[i].get('source').lower() in self.hostcapDict else 0
+                    m = ''
+                    for x in range(3600):
+                        try:
+                            if control.monitor.abortRequested():
+                                return sys.exit()
+                            if progressDialog.iscanceled():
+                                return progressDialog.close()
+                        except:
+                            pass
+                        k = control.condVisibility('Window.IsActive(virtualkeyboard)')
+                        if k:
+                            m += '1'; m = m[-1]
+                        if (w.is_alive() == False or x > 30 + offset) and not k:
+                            break
+                        k = control.condVisibility('Window.IsActive(yesnoDialog)')
+                        if k:
+                            m += '1'; m = m[-1]
+                        if (w.is_alive() == False or x > 30 + offset) and not k:
+                            break
+                        time.sleep(0.5)
+                    for x in range(30):
+                        try:
+                            if control.monitor.abortRequested():
+                                return sys.exit()
+                            if progressDialog.iscanceled():
+                                return progressDialog.close()
+                        except:
+                            pass
+                        if m == '':
+                            break
+                        if w.is_alive() == False:
+                            break
+                        time.sleep(0.5)
+                    if w.is_alive() == True:
+                        block = items[i]['source']
+                    if self.url == None:
+                        raise Exception()
+                    self.selectedSource = items[i]['label']
+                    try:
+                        progressDialog.close()
+                    except:
+                        pass
+                    control.execute('Dialog.Close(virtualkeyboard)')
+                    control.execute('Dialog.Close(yesnoDialog)')
+                    return self.url
+                except:
+                    pass
+            try:
+                progressDialog.close()
+            except:
+                pass
+            del progressDialog
+        except:
+            try:
+                progressDialog.close()
+            except:
+                pass
+            del progressDialog
+            log_utils.log('sourcesDialog', 1)
+
+
+    def sourcesDirect(self, items):
+        filter = [i for i in items if i['source'].lower() in self.hostcapDict]
+        items = [i for i in items if not i in filter]
+        filter = [i for i in items if i['source'].lower() in self.hostblockDict]
+        items = [i for i in items if not i in filter]
+        items = [i for i in items if ('autoplay' in i and i['autoplay'] == True) or not 'autoplay' in i]
+        if control.setting('autoplay.sd') == 'true':
+            items = [i for i in items if not i['quality'].lower() in ['8k', '6k', '4k', '2k', '1080p', '720p', 'hd']]
+        u = None
+        header = control.addonInfo('name') + ': Resolving...'
+        try:
+            control.sleep(1000)
+            progressDialog = control.progressDialog if control.setting('progress.dialog') == '0' else control.progressDialogBG
+            progressDialog.create(header, '')
+            #progressDialog.update(0)
+        except:
+            pass
+        for i in range(len(items)):
+            label = re.sub(' {2,}', ' ', str(items[i]['label']))
+            try:
+                if progressDialog.iscanceled():
+                    break
+                progressDialog.update(int((100 / float(len(items))) * i), label)
+            except:
+                progressDialog.update(int((100 / float(len(items))) * i), str(header) + '[CR]' + label)
+            try:
+                if control.monitor.abortRequested():
+                    return sys.exit()
+                url = self.sourcesResolve(items[i])
+                if u == None:
+                    u = url
+                if not url == None:
+                    break
+            except:
+                pass
+        try:
+            progressDialog.close()
+        except:
+            pass
+        del progressDialog
+        return u
+
+
+    def prepareSources(self):
+        try:
+            control.makeFile(control.dataPath)
+            dbcon = database.connect(self.sourceFile)
+            dbcur = dbcon.cursor()
+            dbcur.execute("CREATE TABLE IF NOT EXISTS rel_url (""source TEXT, ""imdb_id TEXT, ""season TEXT, ""episode TEXT, ""rel_url TEXT, ""UNIQUE(source, imdb_id, season, episode)"");")
+            dbcur.execute("CREATE TABLE IF NOT EXISTS rel_src (""source TEXT, ""imdb_id TEXT, ""season TEXT, ""episode TEXT, ""hosts TEXT, ""added TEXT, ""UNIQUE(source, imdb_id, season, episode)"");")
+        except:
+            pass
+
+
+    def getMovieSource(self, title, localtitle, aliases, year, imdb, source, call):
+        try:
+            dbcon = database.connect(self.sourceFile)
+            dbcur = dbcon.cursor()
+        except:
+            pass
+        ''' Fix to stop items passed with a 0 IMDB id pulling old unrelated sources from the database. '''
+        if imdb == '0':
+            try:
+                dbcur.execute("DELETE FROM rel_src WHERE source = '%s' AND imdb_id = '%s' AND season = '%s' AND episode = '%s'" % (source, imdb, '', ''))
+                dbcur.execute("DELETE FROM rel_url WHERE source = '%s' AND imdb_id = '%s' AND season = '%s' AND episode = '%s'" % (source, imdb, '', ''))
+                dbcon.commit()
+            except:
+                pass
+        ''' END '''
+        try:
+            sources = []
+            dbcur.execute("SELECT * FROM rel_src WHERE source = '%s' AND imdb_id = '%s' AND season = '%s' AND episode = '%s'" % (source, imdb, '', ''))
+            match = dbcur.fetchone()
+            t1 = int(re.sub('[^0-9]', '', str(match[5])))
+            t2 = int(datetime.datetime.now().strftime("%Y%m%d%H%M"))
+            update = abs(t2 - t1) > 60
+            if update == False:
+                sources = eval(six.ensure_str(match[4]))
+                return self.sources.extend(sources)
+        except:
+            pass
+        try:
+            url = None
+            dbcur.execute("SELECT * FROM rel_url WHERE source = '%s' AND imdb_id = '%s' AND season = '%s' AND episode = '%s'" % (source, imdb, '', ''))
+            url = dbcur.fetchone()
+            url = eval(six.ensure_str(url[4]))
+        except:
+            pass
+        try:
+            if url == None:
+                url = call.movie(imdb, title, localtitle, aliases, year)
+            if url == None:
+                raise Exception()
+            dbcur.execute("DELETE FROM rel_url WHERE source = '%s' AND imdb_id = '%s' AND season = '%s' AND episode = '%s'" % (source, imdb, '', ''))
+            dbcur.execute("INSERT INTO rel_url Values (?, ?, ?, ?, ?)", (source, imdb, '', '', repr(url)))
+            dbcon.commit()
+        except:
+            pass
+        try:
+            sources = []
+            sources = call.sources(url, self.hostDict)
+            if sources == None or sources == []:
+                raise Exception()
+            sources = [json.loads(t) for t in set(json.dumps(d, sort_keys=True) for d in sources)]
+            for i in sources:
+                i.update({'provider': source})
+            self.sources.extend(sources)
+            dbcur.execute("DELETE FROM rel_src WHERE source = '%s' AND imdb_id = '%s' AND season = '%s' AND episode = '%s'" % (source, imdb, '', ''))
+            dbcur.execute("INSERT INTO rel_src Values (?, ?, ?, ?, ?, ?)", (source, imdb, '', '', repr(sources), datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
+            dbcon.commit()
+        except:
+            pass
+
+
+    def getEpisodeSource(self, title, year, imdb, tmdb, season, episode, tvshowtitle, localtvshowtitle, aliases, premiered, source, call):
+        try:
+            dbcon = database.connect(self.sourceFile)
+            dbcur = dbcon.cursor()
+        except:
+            pass
+        try:
+            sources = []
+            dbcur.execute("SELECT * FROM rel_src WHERE source = '%s' AND imdb_id = '%s' AND season = '%s' AND episode = '%s'" % (source, imdb, season, episode))
+            match = dbcur.fetchone()
+            t1 = int(re.sub('[^0-9]', '', str(match[5])))
+            t2 = int(datetime.datetime.now().strftime("%Y%m%d%H%M"))
+            update = abs(t2 - t1) > 60
+            if update == False:
+                sources = eval(six.ensure_str(match[4]))
+                return self.sources.extend(sources)
+        except:
+            pass
+        try:
+            url = None
+            dbcur.execute("SELECT * FROM rel_url WHERE source = '%s' AND imdb_id = '%s' AND season = '%s' AND episode = '%s'" % (source, imdb, '', ''))
+            url = dbcur.fetchone()
+            url = eval(six.ensure_str(url[4]))
+        except:
+            pass
+        try:
+            if url == None:
+                url = call.tvshow(imdb, tmdb, tvshowtitle, localtvshowtitle, aliases, year)
+            if url == None:
+                raise Exception()
+            dbcur.execute("DELETE FROM rel_url WHERE source = '%s' AND imdb_id = '%s' AND season = '%s' AND episode = '%s'" % (source, imdb, '', ''))
+            dbcur.execute("INSERT INTO rel_url Values (?, ?, ?, ?, ?)", (source, imdb, '', '', repr(url)))
+            dbcon.commit()
+        except:
+            pass
+        try:
+            ep_url = None
+            dbcur.execute("SELECT * FROM rel_url WHERE source = '%s' AND imdb_id = '%s' AND season = '%s' AND episode = '%s'" % (source, imdb, season, episode))
+            ep_url = dbcur.fetchone()
+            ep_url = eval(six.ensure_str(ep_url[4]))
+        except:
+            pass
+        try:
+            if url == None:
+                raise Exception()
+            if ep_url == None:
+                ep_url = call.episode(url, imdb, tmdb, title, premiered, season, episode)
+            if ep_url == None:
+                raise Exception()
+            dbcur.execute("DELETE FROM rel_url WHERE source = '%s' AND imdb_id = '%s' AND season = '%s' AND episode = '%s'" % (source, imdb, season, episode))
+            dbcur.execute("INSERT INTO rel_url Values (?, ?, ?, ?, ?)", (source, imdb, season, episode, repr(ep_url)))
+            dbcon.commit()
+        except:
+            pass
+        try:
+            sources = []
+            sources = call.sources(ep_url, self.hostDict)
+            if sources == None or sources == []:
+                raise Exception()
+            sources = [json.loads(t) for t in set(json.dumps(d, sort_keys=True) for d in sources)]
+            for i in sources:
+                i.update({'provider': source})
+            self.sources.extend(sources)
+            dbcur.execute("DELETE FROM rel_src WHERE source = '%s' AND imdb_id = '%s' AND season = '%s' AND episode = '%s'" % (source, imdb, season, episode))
+            dbcur.execute("INSERT INTO rel_src Values (?, ?, ?, ?, ?, ?)", (source, imdb, season, episode, repr(sources), datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
+            dbcon.commit()
+        except:
+            pass
+
+
+    def uniqueSourcesGen(self, sources):
+        uniqueURLs = set()
+        for source in sources:
+            url = source.get('url')
+            if isinstance(url, six.string_types):
+                if url not in uniqueURLs:
+                    uniqueURLs.add(url)
+                    yield source
+                else:
+                    pass
+            else:
+                yield source
+
+
+    def sourcesSort(self):
+        sort_provider = control.setting('sort.provider') or 'true'
+        random.shuffle(self.sources)
+        local = [i for i in self.sources if 'local' in i and i['local'] == True]
+        self.sources = [i for i in self.sources if not i in local]
+        if sort_provider == 'true':
+            self.sources = sorted(self.sources, key=lambda k: k['provider'])
+        filter = []
+        filter += local
+        filter += [i for i in self.sources if i['quality'].lower() == '8k']
+        filter += [i for i in self.sources if i['quality'].lower() == '6k']
+        filter += [i for i in self.sources if i['quality'].lower() == '4k']
+        filter += [i for i in self.sources if i['quality'].lower() == '2k']
+        filter += [i for i in self.sources if i['quality'].lower() == '1080p']
+        filter += [i for i in self.sources if i['quality'].lower() == '720p']
+        filter += [i for i in self.sources if i['quality'].lower() == 'hd']
+        filter += [i for i in self.sources if i['quality'].lower() == 'sd']
+        filter += [i for i in self.sources if i['quality'].lower() in ['scr', 'cam']]
+        self.sources = filter
+        self.sources = self.sources[:4000]
+        double_line = control.setting('sourcelist.linesplit') == '1'
+        simple = control.setting('sourcelist.linesplit') == '2'
+        single_line = control.setting('sourcelist.linesplit') == '0'
+        for i in range(len(self.sources)):
+            #info_fetch = ' '.join((self.sources[i].get('name', ''), self.sources[i]['url']))
+            #t = source_utils.getFileType(info_fetch)
+            u = self.sources[i]['url']
+            p = self.sources[i]['provider']
+            q = self.sources[i]['quality']
+            s = self.sources[i]['source']
+            s = s.rsplit('.', 1)[0]
+            try:
+                f = ' / '.join(['%s' % info.strip() for info in self.sources[i].get('info', '').split('|')])
+            except:
+                f = ''
+            if double_line:
+                label = '%03d' % (int(i+1))
+                label += ' | [B]%s[/B] | %s | [B]%s[/B][CR]    [I]%s[/I]' % (q, p, s, f)
+                #label += ' | [B]%s[/B] | %s | [B]%s[/B][CR]    [I]%s /%s[/I]' % (q, p, s, f, t)
+            elif simple:
+                label = '%03d' % (int(i+1))
+                label += ' | [B]%s[/B] | %s | [B]%s[/B]' % (q, p, s)
+            else:
+                label = '%03d' % (int(i+1))
+                label += ' | [B]%s[/B] | %s | [B]%s[/B] | [I]%s[/I]' % (q, p, s, f)
+                #label += ' | [B]%s[/B] | %s | [B]%s[/B] | [I]%s /%s[/I]' % (q, p, s, f, t)
+            label = label.replace(' |  |', ' |').replace('| 0 |', '|').replace('[I] /[/I]', '').replace('[I]%s /[/I]' % f, '[I]%s[/I]' % f)
+            #label = label.replace(' |  |', ' |').replace('| 0 |', '|').replace('[I] /[/I]', '').replace('[I] /%s[/I]' % t, '[I]%s[/I]' % t).replace('[I]%s /[/I]' % f, '[I]%s[/I]' % f)
+            if double_line:
+                label_up = label.split('[CR]')[0]
+                label_up_clean = label_up.replace('[B]', '').replace('[/B]', '')
+                label_down = label.split('[CR]')[1]
+                label_down_clean = label_down.replace('[I]', '').replace('[/I]', '')
+                if len(label_down_clean) > len(label_up_clean):
+                    label_up += (len(label_down_clean) - len(label_up_clean)) * '  '
+                    label = label_up + '[CR]' + label_down
+            self.sources[i]['label'] = '[UPPERCASE]' + label + '[/UPPERCASE]'
+        self.sources = [i for i in self.sources if 'label' in i]
+        return self.sources
+
+
+    def sourcesFilter(self, _content, sort=False):
+        max_quality = control.setting('quality.max') or '0'
+        max_quality = int(max_quality)
+        min_quality = control.setting('quality.min') or '6'
+        min_quality = int(min_quality)
+        remove_cam = control.setting('remove.cam') or 'false'
+        remove_captcha = control.setting('remove.captcha') or 'false'
+        remove_hevc = control.setting('remove.hevc') or 'false'
+        remove_dupes = control.setting('remove.dupes') or 'true'
+        stotal = self.sources
+        for i in self.sources:
+            if i['quality'].lower() == 'hd':
+                i.update({'quality': '720p'})
+            if _content == 'episode' and i['quality'].lower() in ['scr', 'cam']:
+                i.update({'quality': 'sd'})
+            if i['quality'].lower() == '8k':
+                i.update({'q_filter': 0})
+            elif i['quality'].lower() == '6k':
+                i.update({'q_filter': 1})
+            elif i['quality'].lower() == '4k':
+                i.update({'q_filter': 2})
+            elif i['quality'].lower() == '2k':
+                i.update({'q_filter': 3})
+            elif i['quality'].lower() == '1080p':
+                i.update({'q_filter': 4})
+            elif i['quality'].lower() == '720p':
+                i.update({'q_filter': 5})
+            else:
+                i.update({'q_filter': 6})
+        self.sources = [i for i in self.sources if max_quality <= i.get('q_filter', 6) <= min_quality]
+        if remove_cam == 'true':
+            self.sources = [i for i in self.sources if not i['quality'].lower() in ['scr', 'cam']]
+        try:
+            if remove_dupes == 'true' and len(self.sources) > 1:
+                self.sources = list(self.uniqueSourcesGen(self.sources))
+        except:
+            log_utils.log('remove_dupes', 1)
+            pass
+        if remove_hevc == 'true':
+            self.sources = [i for i in self.sources if not any(x in i['url'].lower() for x in ['hevc', 'h265', 'x265', 'h.265', 'x.265']) and not any(x in i.get('info', '').lower() for x in ['hevc', 'h265', 'x265', 'h.265', 'x.265'])]
+        if remove_captcha == 'true':
+            self.sources = [i for i in self.sources if not i['source'].lower() in self.hostcapDict]
+        self.sources = [i for i in self.sources if not i['source'].lower() in self.hostblockDict]
+        filtered_out = [i for i in stotal if not i in self.sources]
+        self.filtered_sources.extend(filtered_out)
+        if sort == True:
+            self.sourcesSort()
+        return self.sources
+
+
+    def getSources(self, title, year, imdb, tmdb, season, episode, tvshowtitle, premiered, quality='720p', timeout=30):
+        progressDialog = control.progressDialog if control.setting('progress.dialog') == '0' else control.progressDialogBG
+        if progressDialog == control.progressDialogBG:
+            control.idle()
+        progressDialog.create('Providers:')
+        self.prepareSources()
+        sourceDict = self.sourceDict
+        progressDialog.update(0, 'Preparing Sources...')
+        content = 'movie' if tvshowtitle == None else 'episode'
+        if content == 'movie':
+            sourceDict = [(i[0], i[1], getattr(i[1], 'movie', None)) for i in sourceDict]
+            genres = trakt.getGenre('movie', 'imdb', imdb)
+        else:
+            sourceDict = [(i[0], i[1], getattr(i[1], 'tvshow', None)) for i in sourceDict]
+            genres = trakt.getGenre('show', 'tmdb', tmdb)
+        sourceDict = [(i[0], i[1], i[2]) for i in sourceDict if not hasattr(i[1], 'genre_filter') or not i[1].genre_filter or any(x in i[1].genre_filter for x in genres)]
+        sourceDict = [(i[0], i[1]) for i in sourceDict if not i[2] == None]
+        try:
+            sourceDict = [(i[0], i[1], control.setting('provider.' + i[0])) for i in sourceDict]
+        except:
+            sourceDict = [(i[0], i[1], 'true') for i in sourceDict]
+        sourceDict = [(i[0], i[1]) for i in sourceDict if not i[2] == 'false']
+        random.shuffle(sourceDict)
+        threads = []
+        if content == 'movie':
+            title, imdb, year = cleantitle.scene_title(title, imdb, year)
+            log_utils.log('Source Searching Info = [ movie_title: ' + title + ' | year: ' + year + ' | imdb: ' + imdb + ' ]')
+            localtitle = self.getLocalTitle(title, imdb, content)
+            aliases = self.getAliasTitles(imdb, localtitle, content)
+            for i in sourceDict:
+                threads.append(workers.Thread(self.getMovieSource, title, localtitle, aliases, year, imdb, i[0], i[1]))
+        else:
+            tvshowtitle, imdb, year, season, episode = cleantitle.scene_tvtitle(tvshowtitle, imdb, year, season, episode)
+            log_utils.log('Source Searching Info = [ tvshow_title: ' + tvshowtitle + ' | year: ' + year + ' | imdb: ' + imdb + ' | season: ' + season + ' | episode: ' + episode + ' ]')
+            localtvshowtitle = self.getLocalTitle(tvshowtitle, imdb, content)
+            aliases = self.getAliasTitles(imdb, localtvshowtitle, content)
+            for i in sourceDict:
+                threads.append(workers.Thread(self.getEpisodeSource, title, year, imdb, tmdb, season, episode, tvshowtitle, localtvshowtitle, aliases, premiered, i[0], i[1]))
+        s = [i[0] + (i[1],) for i in zip(sourceDict, threads)]
+        s = [(i[2].getName(), i[0]) for i in s]
+        sourcelabelDict = dict([(i[0], i[1].upper()) for i in s])
+        [i.start() for i in threads]
+        max_quality = control.setting('quality.max') or '0'
+        max_quality = int(max_quality)
+        min_quality = control.setting('quality.min') or '6'
+        min_quality = int(min_quality)
+        pre_emp = control.setting('preemptive.termination')
+        pre_emp_limit = int(control.setting('preemptive.limit'))
+        try:
+            timeout = int(control.setting('providers.timeout'))
+        except:
+            timeout = '10'
+        start_time = time.time()
+        end_time = start_time + timeout
+        string3 = 'Remaining Providers: %s'
+        source_8k = source_6k = source_4k = source_2k = source_1080 = source_720 = source_sd = total = source_filtered_out = 0
+        line1 = line2 = ""
+        total_format = '[COLOR %s][B]%s[/B][/COLOR]'
+        pdiag_format = ' 8K: %s | 6K: %s | 4K: %s | 2K: %s [CR] 1080P: %s | 720P: %s | SD: %s [CR] Total: %s | Filtered: %s' if not progressDialog == control.progressDialogBG else '8K: %s | 6K: %s | 4K: %s | 2K: %s | 1080P: %s | 720P: %s | SD: %s | T: %s (F: -%s)'
+        for i in range(0, 4 * timeout):
+            try:
+                if control.monitor.abortRequested():
+                    return sys.exit()
+                try:
+                    if progressDialog.iscanceled():
+                        break
+                except:
+                    pass
+                try:
+                    if progressDialog.isFinished():
+                        break
+                except:
+                    pass
+                self.sourcesFilter(content)
+                if min_quality == 0:
+                    source_8k = len([e for e in self.sources if e['quality'].lower() == '8k'])
+
+                elif min_quality == 1:
+                    source_6k = len([e for e in self.sources if e['quality'].lower() == '6k'])
+                    if max_quality == 0:
+                        source_8k = len([e for e in self.sources if e['quality'].lower() == '8k'])
+
+                elif min_quality == 2:
+                    source_4k = len([e for e in self.sources if e['quality'].lower() == '4k'])
+                    if max_quality == 0:
+                        source_8k = len([e for e in self.sources if e['quality'].lower() == '8k'])
+                        source_6k = len([e for e in self.sources if e['quality'].lower() == '6k'])
+                    elif max_quality == 1:
+                        source_6k = len([e for e in self.sources if e['quality'].lower() == '6k'])
+
+                elif min_quality == 3:
+                    source_2k = len([e for e in self.sources if e['quality'].lower() == '2k'])
+                    if max_quality == 0:
+                        source_8k = len([e for e in self.sources if e['quality'].lower() == '8k'])
+                        source_6k = len([e for e in self.sources if e['quality'].lower() == '6k'])
+                        source_4k = len([e for e in self.sources if e['quality'].lower() == '4k'])
+                    elif max_quality == 1:
+                        source_6k = len([e for e in self.sources if e['quality'].lower() == '6k'])
+                        source_4k = len([e for e in self.sources if e['quality'].lower() == '4k'])
+                    elif max_quality == 2:
+                        source_4k = len([e for e in self.sources if e['quality'].lower() == '4k'])
+
+                elif min_quality == 4:
+                    source_1080 = len([e for e in self.sources if e['quality'].lower() == '1080p'])
+                    if max_quality == 0:
+                        source_8k = len([e for e in self.sources if e['quality'].lower() == '8k'])
+                        source_6k = len([e for e in self.sources if e['quality'].lower() == '6k'])
+                        source_4k = len([e for e in self.sources if e['quality'].lower() == '4k'])
+                        source_2k = len([e for e in self.sources if e['quality'].lower() == '2k'])
+                    elif max_quality == 1:
+                        source_6k = len([e for e in self.sources if e['quality'].lower() == '6k'])
+                        source_4k = len([e for e in self.sources if e['quality'].lower() == '4k'])
+                        source_2k = len([e for e in self.sources if e['quality'].lower() == '2k'])
+                    elif max_quality == 2:
+                        source_4k = len([e for e in self.sources if e['quality'].lower() == '4k'])
+                        source_2k = len([e for e in self.sources if e['quality'].lower() == '2k'])
+                    elif max_quality == 3:
+                        source_2k = len([e for e in self.sources if e['quality'].lower() == '2k'])
+
+                elif min_quality == 5:
+                    source_720 = len([e for e in self.sources if e['quality'].lower() in ['720p', 'hd']])
+                    if max_quality == 0:
+                        source_8k = len([e for e in self.sources if e['quality'].lower() == '8k'])
+                        source_6k = len([e for e in self.sources if e['quality'].lower() == '6k'])
+                        source_4k = len([e for e in self.sources if e['quality'].lower() == '4k'])
+                        source_2k = len([e for e in self.sources if e['quality'].lower() == '2k'])
+                        source_1080 = len([e for e in self.sources if e['quality'].lower() == '1080p'])
+                    elif max_quality == 1:
+                        source_6k = len([e for e in self.sources if e['quality'].lower() == '6k'])
+                        source_4k = len([e for e in self.sources if e['quality'].lower() == '4k'])
+                        source_2k = len([e for e in self.sources if e['quality'].lower() == '2k'])
+                        source_1080 = len([e for e in self.sources if e['quality'].lower() == '1080p'])
+                    elif max_quality == 2:
+                        source_4k = len([e for e in self.sources if e['quality'].lower() == '4k'])
+                        source_2k = len([e for e in self.sources if e['quality'].lower() == '2k'])
+                        source_1080 = len([e for e in self.sources if e['quality'].lower() == '1080p'])
+                    elif max_quality == 3:
+                        source_2k = len([e for e in self.sources if e['quality'].lower() == '2k'])
+                        source_1080 = len([e for e in self.sources if e['quality'].lower() == '1080p'])
+                    elif max_quality == 4:
+                        source_1080 = len([e for e in self.sources if e['quality'].lower() == '1080p'])
+
+                elif min_quality == 6:
+                    source_sd = len([e for e in self.sources if e['quality'].lower() in ['sd', 'scr', 'cam']])
+                    if max_quality == 0:
+                        source_8k = len([e for e in self.sources if e['quality'].lower() == '8k'])
+                        source_6k = len([e for e in self.sources if e['quality'].lower() == '6k'])
+                        source_4k = len([e for e in self.sources if e['quality'].lower() == '4k'])
+                        source_2k = len([e for e in self.sources if e['quality'].lower() == '2k'])
+                        source_1080 = len([e for e in self.sources if e['quality'].lower() == '1080p'])
+                        source_720 = len([e for e in self.sources if e['quality'].lower() in ['720p', 'hd']])
+                    elif max_quality == 1:
+                        source_6k = len([e for e in self.sources if e['quality'].lower() == '6k'])
+                        source_4k = len([e for e in self.sources if e['quality'].lower() == '4k'])
+                        source_2k = len([e for e in self.sources if e['quality'].lower() == '2k'])
+                        source_1080 = len([e for e in self.sources if e['quality'].lower() == '1080p'])
+                        source_720 = len([e for e in self.sources if e['quality'].lower() in ['720p', 'hd']])
+                    elif max_quality == 2:
+                        source_4k = len([e for e in self.sources if e['quality'].lower() == '4k'])
+                        source_2k = len([e for e in self.sources if e['quality'].lower() == '2k'])
+                        source_1080 = len([e for e in self.sources if e['quality'].lower() == '1080p'])
+                        source_720 = len([e for e in self.sources if e['quality'].lower() in ['720p', 'hd']])
+                    elif max_quality == 3:
+                        source_2k = len([e for e in self.sources if e['quality'].lower() == '2k'])
+                        source_1080 = len([e for e in self.sources if e['quality'].lower() == '1080p'])
+                        source_720 = len([e for e in self.sources if e['quality'].lower() in ['720p', 'hd']])
+                    elif max_quality == 4:
+                        source_1080 = len([e for e in self.sources if e['quality'].lower() == '1080p'])
+                        source_720 = len([e for e in self.sources if e['quality'].lower() in ['720p', 'hd']])
+                    elif max_quality == 5:
+                        source_720 = len([e for e in self.sources if e['quality'].lower() in ['720p', 'hd']])
+
+                total = source_8k + source_6k + source_4k + source_2k + source_1080 + source_720 + source_sd
+                if pre_emp == 'true':
+                    if max_quality == 0:
+                        if source_8k >= pre_emp_limit:
+                            break
+                    elif max_quality == 1:
+                        if source_6k >= pre_emp_limit:
+                            break
+                    elif max_quality == 2:
+                        if source_4k >= pre_emp_limit:
+                            break
+                    elif max_quality == 3:
+                        if source_2k >= pre_emp_limit:
+                            break
+                    elif max_quality == 4:
+                        if source_1080 >= pre_emp_limit:
+                            break
+                    elif max_quality == 5:
+                        if source_720 >= pre_emp_limit:
+                            break
+                    elif max_quality == 6:
+                        if source_sd >= pre_emp_limit:
+                            break
+                source_filtered_out = len([e for e in self.filtered_sources])
+                source_8k_label = total_format % ('darkorange', source_8k) if source_8k == 0 else total_format % ('lime', source_8k)
+                source_6k_label = total_format % ('darkorange', source_6k) if source_6k == 0 else total_format % ('lime', source_6k)
+                source_4k_label = total_format % ('darkorange', source_4k) if source_4k == 0 else total_format % ('lime', source_4k)
+                source_2k_label = total_format % ('darkorange', source_2k) if source_2k == 0 else total_format % ('lime', source_2k)
+                source_1080_label = total_format % ('darkorange', source_1080) if source_1080 == 0 else total_format % ('lime', source_1080)
+                source_720_label = total_format % ('darkorange', source_720) if source_720 == 0 else total_format % ('lime', source_720)
+                source_sd_label = total_format % ('darkorange', source_sd) if source_sd == 0 else total_format % ('lime', source_sd)
+                source_total_label = total_format % ('darkorange', total) if total == 0 else total_format % ('lime', total)
+                source_filtered_out_label = total_format % ('darkorange', source_filtered_out) if source_filtered_out == 0 else total_format % ('lime', source_filtered_out)
+                try:
+                    info = [sourcelabelDict[x.getName()] for x in threads if x.is_alive() == True]
+                    line1 = pdiag_format % (source_8k_label, source_6k_label, source_4k_label, source_2k_label, source_1080_label, source_720_label, source_sd_label, source_total_label, source_filtered_out_label)
+                    if len(info) > 5:
+                        line2 = 'Remaining Providers: %s' % (str(len(info)))
+                    elif len(info) > 0:
+                        line2 = 'Remaining Providers: %s' % (', '.join(info).upper())
+                    else:
+                        break
+                    current_time = time.time()
+                    current_progress = current_time - start_time
+                    percent = int((current_progress / float(timeout)) * 100)
+                    if not progressDialog == control.progressDialogBG:
+                        progressDialog.update(max(1, percent), line1 + '[CR]' + line2)
+                    else:
+                        progressDialog.update(max(1, percent), 'Providers:', line1 + '[CR]' + line2)
+                    if end_time < current_time:
+                        break
+                except:
+                    log_utils.log('getSources', 1)
+                    break
+                control.sleep(250)
+            except:
+                log_utils.log('getSources', 1)
+                pass
+        if progressDialog == control.progressDialogBG:
+            progressDialog.close()
+            self.sourcesFilter(content, sort=True)
+        else:
+            self.sourcesFilter(content, sort=True)
+            progressDialog.close()
+        if pre_emp == 'true':
+            self.sourcesFilter(content, sort=True)
+        del progressDialog
+        del threads
+        control.idle()
+        return self.sources
+
+
+    def addItem(self, title):
+        def sourcesDirMeta(metadata):
+            if metadata == None:
+                return metadata
+            allowed = ['icon', 'poster', 'fanart', 'thumb', 'clearlogo', 'clearart', 'discart', 'title', 'year', 'tvshowtitle', 'season', 'episode', 'rating', 'plot', 'trailer', 'mediatype']
+            return {k: v for k, v in six.iteritems(metadata) if k in allowed}
+        control.playlist.clear()
+        items = control.window.getProperty(self.itemProperty)
+        items = json.loads(items)
+        if items == None or len(items) == 0:
+            control.idle() ; sys.exit()
+        meta = control.window.getProperty(self.metaProperty)
+        meta = json.loads(meta)
+        meta = sourcesDirMeta(meta)
+        sysaddon = sys.argv[0]
+        syshandle = int(sys.argv[1])
+        downloads = True if control.setting('downloads') == 'true' and not (control.setting('movie.download.path') == '' or control.setting('tv.download.path') == '') else False
+        listMeta = control.setting('sourcelist.meta')
+        try:
+            systitle = sysname = urllib_parse.quote_plus(title)
+        except:
+            systitle = sysname = urllib_parse.quote_plus(meta['title'])
+        if 'tvshowtitle' in meta and 'season' in meta and 'episode' in meta:
+            sysname += urllib_parse.quote_plus(' S%02dE%02d' % (int(meta['season']), int(meta['episode'])))
+        elif 'year' in meta:
+            sysname += urllib_parse.quote_plus(' (%s)' % meta['year'])
+        poster = meta.get('poster') or control.addonPoster()
+        if control.setting('fanart') == 'true':
+            fanart = meta.get('fanart') or control.addonFanart()
+        else:
+            fanart = control.addonFanart()
+        thumb = meta.get('thumb') or poster or fanart
+        clearlogo = meta.get('clearlogo', '') or ''
+        clearart = meta.get('clearart', '') or ''
+        discart = meta.get('discart', '') or ''
+        sysimage = urllib_parse.quote_plus(six.ensure_str(poster))
+        for i in range(len(items)):
+            try:
+                label = str(items[i]['label'])
+                syssource = urllib_parse.quote_plus(json.dumps([items[i]]))
+                sysurl = '%s?action=play_item&title=%s&source=%s' % (sysaddon, systitle, syssource)
+                cm = []
+                if downloads == True:
+                    cm.append(('DownLoad', 'RunPlugin(%s?action=download&name=%s&image=%s&source=%s)' % (sysaddon, sysname, sysimage, syssource)))
+                try:
+                    item = control.item(label=label, offscreen=True)
+                except:
+                    item = control.item(label=label)
+                item.addContextMenuItems(cm)
+                if listMeta == 'true':
+                    item.setArt({'thumb': thumb, 'icon': thumb, 'poster': poster, 'fanart': fanart, 'clearlogo': clearlogo, 'clearart': clearart, 'discart': discart})
+                    video_streaminfo = {'codec': 'h264'}
+                    item.addStreamInfo('video', video_streaminfo)
+                    item.setInfo(type='video', infoLabels=control.metadataClean(meta))
+                else:
+                    item.setArt({'thumb': thumb})
+                    item.setInfo(type='video', infoLabels={})
+                control.addItem(handle=syshandle, url=sysurl, listitem=item, isFolder=False)
+            except:
+                pass
+        control.content(syshandle, 'files')
+        control.directory(syshandle, cacheToDisc=True)
+
+
+    def play(self, title, year, imdb, tmdb, season, episode, tvshowtitle, premiered, meta, select):
+        try:
+            url = None
+            items = self.getSources(title, year, imdb, tmdb, season, episode, tvshowtitle, premiered)
+            select = control.setting('hosts.mode') if select == None else select
+            title = tvshowtitle if not tvshowtitle == None else title
+            title = cleantitle.normalize(title)
+            if len(items) > 0:
+                if select == '1' and 'plugin' in control.infoLabel('Container.PluginName'):
+                    control.window.clearProperty(self.itemProperty)
+                    control.window.setProperty(self.itemProperty, json.dumps(items))
+                    control.window.clearProperty(self.metaProperty)
+                    control.window.setProperty(self.metaProperty, meta)
+                    control.sleep(200)
+                    return control.execute('Container.Update(%s?action=add_item&title=%s)' % (sys.argv[0], urllib_parse.quote_plus(title)))
+                elif select == '0' or select == '1':
+                    url = self.sourcesDialog(items)
+                else:
+                    url = self.sourcesDirect(items)
+            if url == 'close://' or url == None:
+                self.url = url
+                return self.errorForSources()
+            try:
+                meta = json.loads(meta)
+            except:
+                pass
+            from resources.lib.modules.player import player
+            player().run(title, year, season, episode, imdb, tmdb, url, meta)
+        except:
+            pass
+
+
+    def playItem(self, title, source):
+        try:
+            meta = control.window.getProperty(self.metaProperty)
+            meta = json.loads(meta)
+            year = meta['year'] if 'year' in meta else None
+            season = meta['season'] if 'season' in meta else None
+            episode = meta['episode'] if 'episode' in meta else None
+            imdb = meta['imdb'] if 'imdb' in meta else None
+            tvdb = meta['tvdb'] if 'tvdb' in meta else None
+            tmdb = meta['tmdb'] if 'tmdb' in meta else None
+            next = []
+            prev = []
+            total = []
+            for i in range(1,1000):
+                try:
+                    u = control.infoLabel('ListItem(%s).FolderPath' % str(i))
+                    if u in total:
+                        raise Exception()
+                    total.append(u)
+                    u = dict(urllib_parse.parse_qsl(u.replace('?','')))
+                    u = json.loads(u['source'])[0]
+                    next.append(u)
+                except:
+                    break
+            for i in range(-1000,0)[::-1]:
+                try:
+                    u = control.infoLabel('ListItem(%s).FolderPath' % str(i))
+                    if u in total:
+                        raise Exception()
+                    total.append(u)
+                    u = dict(urllib_parse.parse_qsl(u.replace('?','')))
+                    u = json.loads(u['source'])[0]
+                    prev.append(u)
+                except:
+                    break
+            items = json.loads(source)
+            items = [i for i in items+next+prev][:40]
+            header = control.addonInfo('name') + ' : Resolving...'
+            progressDialog = control.progressDialog if control.setting('progress.dialog') == '0' else control.progressDialogBG
+            progressDialog.create(header, '')
+            #progressDialog.update(0)
+            block = None
+            for i in range(len(items)):
+                try:
+                    label = re.sub(' {2,}', ' ', str(items[i]['label']))
+                    try:
+                        if progressDialog.iscanceled():
+                            break
+                        progressDialog.update(int((100 / float(len(items))) * i), label)
+                    except:
+                        progressDialog.update(int((100 / float(len(items))) * i), str(header) + '[CR]' + label)
+                    if items[i]['source'] == block:
+                        raise Exception()
+                    w = workers.Thread(self.sourcesResolve, items[i])
+                    w.start()
+                    offset = 60 * 2 if items[i].get('source').lower() in self.hostcapDict else 0
+                    m = ''
+                    for x in range(3600):
+                        try:
+                            if control.monitor.abortRequested():
+                                return sys.exit()
+                            if progressDialog.iscanceled():
+                                return progressDialog.close()
+                        except:
+                            pass
+                        k = control.condVisibility('Window.IsActive(virtualkeyboard)')
+                        if k:
+                            m += '1'; m = m[-1]
+                        if (w.is_alive() == False or x > 30 + offset) and not k:
+                            break
+                        k = control.condVisibility('Window.IsActive(yesnoDialog)')
+                        if k:
+                            m += '1'; m = m[-1]
+                        if (w.is_alive() == False or x > 30 + offset) and not k:
+                            break
+                        time.sleep(0.5)
+                    for x in range(30):
+                        try:
+                            if control.monitor.abortRequested():
+                                return sys.exit()
+                            if progressDialog.iscanceled():
+                                return progressDialog.close()
+                        except:
+                            pass
+                        if m == '':
+                            break
+                        if w.is_alive() == False:
+                            break
+                        time.sleep(0.5)
+                    if w.is_alive() == True:
+                        block = items[i]['source']
+                    if self.url == None:
+                        raise Exception()
+                    try:
+                        progressDialog.close()
+                    except:
+                        pass
+                    control.sleep(200)
+                    control.execute('Dialog.Close(virtualkeyboard)')
+                    control.execute('Dialog.Close(yesnoDialog)')
+                    from resources.lib.modules.player import player
+                    player().run(title, year, season, episode, imdb, tmdb, self.url, meta)
+                    return self.url
+                except:
+                    pass
+            try:
+                progressDialog.close()
+            except:
+                pass
+            del progressDialog
+            self.errorForSources()
+        except:
+            pass
+
+
+    def getLocalTitle(self, title, imdb, content):
+        t = trakt.getMovieTranslation(imdb, 'en') if content == 'movie' else trakt.getTVShowTranslation(imdb, 'en')
+        return t or title
+
+
+    def getAliasTitles(self, imdb, localtitle, content):
+        try:
+            t = trakt.getMovieAliases(imdb) if content == 'movie' else trakt.getTVShowAliases(imdb)
+            #t = [i for i in t if i.get('country', '').lower() in ['en', '', 'us'] and i.get('title', '').lower() != localtitle.lower()]
+            # Ditched t2 so the match alias def will work how i want it lol.
+            return t
+        except:
+            return []
+
+
+    def alterSources(self, url, meta):
+        try:
+            if control.setting('hosts.mode') == '2':
+                url += '&select=1'
+            else:
+                url += '&select=2'
+            control.execute('RunPlugin(%s)' % url)
+        except:
+            pass
+
+
+    def enableAll(self):
+        try:
+            sourceDict = self.sourceDict
+            for i in sourceDict:
+                source_setting = 'provider.' + i[0]
+                control.setSetting(source_setting, 'true')
+        except:
+            pass
+        control.openSettings(query='4.1')
+
+
+    def disableAll(self):
+        try:
+            sourceDict = self.sourceDict
+            for i in sourceDict:
+                source_setting = 'provider.' + i[0]
+                control.setSetting(source_setting, 'false')
+        except:
+            pass
+        control.openSettings(query='4.2')
+
+
